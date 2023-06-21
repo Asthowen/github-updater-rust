@@ -1,5 +1,3 @@
-use std::io::Write;
-
 #[derive(Debug, Clone)]
 pub struct BuilderNotInitialized;
 
@@ -14,7 +12,7 @@ impl std::fmt::Display for BuilderNotInitialized {
 
 impl From<reqwest::Error> for BuilderNotInitialized {
     fn from(error: reqwest::Error) -> Self {
-        write!(std::io::stdout(), "reqwest Error: {}", error).unwrap();
+        print!("reqwest Error: {}", error);
         BuilderNotInitialized
     }
 }

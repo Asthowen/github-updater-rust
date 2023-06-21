@@ -23,6 +23,6 @@ impl From<std::io::Error> for UpdateError {
 
 impl From<BuilderNotInitialized> for UpdateError {
     fn from(_: BuilderNotInitialized) -> Self {
-        UpdateError("You must call the build method on the builder to use it.".to_string())
+        UpdateError("You must call the build method on the builder to use it.".to_owned())
     }
 }

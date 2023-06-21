@@ -1,6 +1,6 @@
 [package]
 name = "github-updater"
-version = "0.0.1"
+version = "0.0.2"
 authors = ["Asthowen<contact@asthowen.fr>"]
 edition = "2021"
 description = "A small library to update rust binaries from GitHub releases."
@@ -9,7 +9,7 @@ readme = "README.md"
 license = "GPL-3.0"
 
 [dependencies]
-tokio = { version = "1.28.0", default-features = false, features = ["fs"]}
-reqwest = { version = "0.11.17", features = ["json"] }
-serde = { version = "1.0.163", features = ["derive"] }
-serde_json = "1.0.96"
+tokio = { version = "1.28.2", default-features = false, features = ["fs"]}
+reqwest = { version = "0.11.18", features = ["json"] }
+serde = { version = "1.0.164", features = ["derive"] }
+serde_json = "1.0.97"

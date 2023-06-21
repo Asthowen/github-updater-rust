@@ -27,6 +27,7 @@ let mut updater_builder = GithubUpdater::builder()
     .with_app_name("app-name")
     .with_rust_target("i686-unknown-linux-musl")
     .with_release_file_name_pattern("{app_name}-{app_version}-{rust_target}")
+    .with_file_extension("exe")
     .with_github_token("")
     .build()
     .unwrap();

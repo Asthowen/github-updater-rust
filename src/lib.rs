@@ -16,6 +16,7 @@ struct Release {
 
 #[derive(Debug, Deserialize)]
 struct Asset {
+    url: String,
     browser_download_url: String,
 }
 
@@ -28,6 +29,7 @@ pub struct GithubUpdater {
     rust_target: Option<String>,
     repository_infos: Option<(String, String)>,
     download_path: Option<PathBuf>,
+    file_extension: Option<String>,
     release_url: Option<String>,
     app_version: Option<String>,
     need_refresh: bool,
@@ -44,6 +46,7 @@ impl GithubUpdater {
             rust_target: None,
             repository_infos: None,
             download_path: None,
+            file_extension: None,
             release_url: None,
             app_version: None,
             need_refresh: true,
@@ -51,37 +54,37 @@ impl GithubUpdater {
     }
 
     pub fn with_reqwest_client(mut self, reqwest_client: reqwest::Client) -> Self {
-        self.reqwest_client = Option::from(reqwest_client);
+        self.reqwest_client = Some(reqwest_client);
 
         self
     }
 
     pub fn with_initialized_reqwest_client(mut self) -> Self {
-        self.reqwest_client = Option::from(reqwest::Client::new());
+        self.reqwest_client = Some(reqwest::Client::new());
 
         self
     }
 
     pub fn with_release_file_name_pattern<S: Into<String>>(mut self, pattern: S) -> Self {
-        self.pattern = Option::from(pattern.into());
+        self.pattern = Some(pattern.into());
 
         self
     }
 
     pub fn with_app_name<S: Into<String>>(mut self, app_name: S) -> Self {
-        self.app_name = Option::from(app_name.into());
+        self.app_name = Some(app_name.into());
 
         self
     }
 
     pub fn with_github_token<S: Into<String>>(mut self, github_token: S) -> Self {
-        self.github_token = Option::from(github_token.into());
+        self.github_token = Some(github_token.into());
 
         self
     }
 
     pub fn with_rust_target<S: Into<String>>(mut self, rust_taget: S) -> Self {
-        self.rust_target = Option::from(rust_taget.into());
+        self.rust_target = Some(rust_taget.into());
 
         self
     }
@@ -91,13 +94,19 @@ impl GithubUpdater {
         repository_owner: S,
         repository_name: S,
     ) -> Self {
-        self.repository_infos = Option::from((repository_owner.into(), repository_name.into()));
+        self.repository_infos = Some((repository_owner.into(), repository_name.into()));
 
         self
     }
 
     pub fn with_download_path<P: AsRef<Path>>(mut self, path: &P) -> Self {
-        self.download_path = Option::from(path.as_ref().to_owned());
+        self.download_path = Some(path.as_ref().to_owned());
+
+        self
+    }
+
+    pub fn with_file_extension<S: Into<String>>(mut self, extension: S) -> Self {
+        self.file_extension = Some(extension.into());
 
         self
     }
@@ -128,9 +137,17 @@ impl GithubUpdater {
         Ok(self)
     }
 
-    pub async fn fetch_last_release(&mut self) -> Result<(), BuilderNotInitialized> {
+    fn generate_file_name(&self, app_name: &String) -> String {
+        let extension: String = self
+            .file_extension
+            .as_ref()
+            .map_or_else(String::default, |ext| format!(".{}", ext));
+        format!("{}{}", app_name, extension)
+    }
+
+    pub async fn fetch_last_release(&mut self) -> Result<(), UpdateError> {
         if !self.builded {
-            return Err(BuilderNotInitialized);
+            return Err(BuilderNotInitialized.into());
         }
 
         let repository_infos = self.repository_infos.as_ref().unwrap();
@@ -151,7 +168,6 @@ impl GithubUpdater {
         }
 
         let response = build_request.send().await?.json::<Release>().await?;
-
         let asset_urls: Vec<String> = response
             .assets
             .iter()
@@ -166,12 +182,30 @@ impl GithubUpdater {
             pattern = pattern.replace("{rust_target}", rust_target);
         }
         pattern = pattern.replace("{app_version}", &response.name);
-        self.app_version = Option::from(response.name);
+        self.app_version = Some(response.name);
 
         let matching_value = asset_urls.iter().find(|&value| value.contains(&pattern));
         if let Some(value) = matching_value {
-            self.release_url = Option::from(value).cloned();
+            let api_url: &String = match response
+                .assets
+                .iter()
+                .find(|asset| &asset.browser_download_url == value)
+            {
+                Some(asset) => &asset.url,
+                None => {
+                    return Err(UpdateError(
+                        "An error occurred while retrieving the release URL.".to_owned(),
+                    ));
+                }
+            };
+
+            self.release_url = Some(api_url).cloned();
+        } else {
+            return Err(UpdateError(
+                "No URL matching the pattern entered was found.".to_owned(),
+            ));
         }
+
         Ok(())
     }
 
@@ -182,9 +216,10 @@ impl GithubUpdater {
 
         let path = self.download_path.as_ref().ok_or(BuilderNotInitialized)?;
         let current_version = self.app_version.as_ref().ok_or(BuilderNotInitialized)?;
-        let path_version_file = path.join("binary-version.txt");
+        let app_name = self.app_name.as_ref().ok_or(BuilderNotInitialized)?;
+        let path_version_file = path.join(format!("binary-version-{}.txt", app_name));
 
-        if !path_version_file.exists() || !path.join("afetch").exists() {
+        if !path_version_file.exists() || !path.join(self.generate_file_name(app_name)).exists() {
             return Ok(true);
         }
 
@@ -205,7 +240,9 @@ impl GithubUpdater {
         let app_name = self.app_name.as_ref().ok_or(BuilderNotInitialized)?;
         let path = self.download_path.as_ref().ok_or(BuilderNotInitialized)?;
         let binary_path = path.join(app_name);
-        let release_url = self.release_url.as_ref().ok_or(BuilderNotInitialized)?;
+        let release_url = self.release_url.as_ref().ok_or(UpdateError(
+            "An error occurred while retrieving the release URL.".to_owned(),
+        ))?;
 
         if path.exists() {
             if binary_path.exists() {
@@ -220,20 +257,23 @@ impl GithubUpdater {
             .clone()
             .unwrap()
             .get(release_url)
-            .header("User-Agent", "GitHub-Updater");
+            .header("User-Agent", "GitHub-Updater")
+            .header("Accept", "application/octet-stream");
         if let Some(token) = &self.github_token {
             build_request = build_request.header("Authorization", format!("token {}", token));
         }
 
         let response = build_request.send().await?;
         if response.status().is_success() {
-            let mut file: File = File::create(&path.join(app_name)).await?;
+            let mut file: File =
+                File::create(&path.join(self.generate_file_name(app_name))).await?;
             let body = response.bytes().await?;
             file.write_all(&body).await?;
 
             // Write version in file
             if let Some(app_version) = &self.app_version {
-                let mut file = File::create(path.join("binary-version.txt")).await?;
+                let mut file =
+                    File::create(path.join(format!("binary-version-{}.txt", app_name))).await?;
                 file.write_all(app_version.as_bytes()).await?;
             }
         } else {
