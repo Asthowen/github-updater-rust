@@ -1,12 +1,25 @@
 use crate::errors::builder_not_initialized::BuilderNotInitialized;
 use crate::errors::update_error::UpdateError;
 use errors::builder_missing_element::BuilderMissingElement;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
 pub mod errors;
+
+/// Download information struct.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DownloadInfos {
+    /// The previous version installed. The value is null if the file was not present before.
+    pub previous_version: Option<String>,
+    /// The new downloaded version.
+    pub new_version: String,
+    /// To find out whether or not an update has been download.
+    pub has_been_updated: bool,
+    /// This shows whether or not the update has been forced.
+    pub forced_update: bool,
+}
 
 #[derive(Debug, Deserialize)]
 struct Release {
@@ -20,9 +33,10 @@ struct Asset {
     browser_download_url: String,
 }
 
+#[derive(Debug, Clone)]
 pub struct GithubUpdater {
     reqwest_client: Option<reqwest::Client>,
-    builded: bool,
+    built: bool,
     pattern: Option<String>,
     app_name: Option<String>,
     github_token: Option<String>,
@@ -33,13 +47,14 @@ pub struct GithubUpdater {
     release_url: Option<String>,
     app_version: Option<String>,
     need_refresh: bool,
+    forced_update: bool,
 }
 
 impl GithubUpdater {
     pub fn builder() -> Self {
         Self {
             reqwest_client: None,
-            builded: false,
+            built: false,
             pattern: None,
             app_name: None,
             github_token: None,
@@ -50,45 +65,178 @@ impl GithubUpdater {
             release_url: None,
             app_version: None,
             need_refresh: true,
+            forced_update: true,
         }
     }
 
+    /// Sets a Reqwest client that has already been initialized.
+    ///
+    /// # Arguments
+    ///
+    /// * `reqwest_client` - The already initialized Reqwest client.
+    ///
+    /// # Returns
+    ///
+    /// The modified `GithubUpdater` builder instance.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use github_updater::GithubUpdater;
+    ///
+    /// let updater_builder = GithubUpdater::builder()
+    ///     .with_app_name("afetch")
+    ///     .build();
+    /// ```
     pub fn with_reqwest_client(mut self, reqwest_client: reqwest::Client) -> Self {
         self.reqwest_client = Some(reqwest_client);
 
         self
     }
 
+    /// Creation of a new Reqwest customer, without option activated.
+    ///
+    /// # Returns
+    ///
+    /// The modified `GithubUpdater` builder instance.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use github_updater::GithubUpdater;
+    ///
+    /// let updater_builder = GithubUpdater::builder()
+    ///     .with_initialized_reqwest_client()
+    ///     .build();
+    /// ```
     pub fn with_initialized_reqwest_client(mut self) -> Self {
         self.reqwest_client = Some(reqwest::Client::new());
 
         self
     }
 
+    /// Sets the filename pattern in GitHub releases.
+    ///
+    /// # Arguments
+    ///
+    /// * `pattern` - The file pattern, which can contain:
+    ///    * `app_name`: The name of the application.
+    ///    * `rust_target`: The Rust target, e.g.: i686-unknown-freebsd.
+    ///    * `app_version`: The version of the application.
+    ///
+    /// # Returns
+    ///
+    /// The modified `GithubUpdater` builder instance.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use github_updater::GithubUpdater;
+    ///
+    /// let updater_builder = GithubUpdater::builder()
+    ///     .with_release_file_name_pattern("{app_name}-{app_version}-{rust_target}")
+    ///     .build();
+    /// ```
     pub fn with_release_file_name_pattern<S: Into<String>>(mut self, pattern: S) -> Self {
         self.pattern = Some(pattern.into());
 
         self
     }
 
+    /// Sets the application name which is used to define the name of the downloaded executable.
+    ///
+    /// # Arguments
+    ///
+    /// * `app_name` - The name of the application.
+    ///
+    /// # Returns
+    ///
+    /// The modified `GithubUpdater` builder instance.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use github_updater::GithubUpdater;
+    ///
+    /// let updater_builder = GithubUpdater::builder()
+    ///     .with_app_name("afetch")
+    ///     .build();
+    /// ```
     pub fn with_app_name<S: Into<String>>(mut self, app_name: S) -> Self {
         self.app_name = Some(app_name.into());
-
         self
     }
 
+    /// Sets the GitHub token which will be used to make requests to the GitHub API.
+    ///
+    /// # Arguments
+    ///
+    /// * `github_token` - The GitHub token to use for authentication.
+    ///
+    /// # Returns
+    ///
+    /// The modified `GithubUpdater` builder instance.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use github_updater::GithubUpdater;
+    ///
+    /// let updater_builder = GithubUpdater::builder()
+    ///     .with_github_token("some")
+    ///     .build();
+    /// ```
     pub fn with_github_token<S: Into<String>>(mut self, github_token: S) -> Self {
         self.github_token = Some(github_token.into());
 
         self
     }
 
-    pub fn with_rust_target<S: Into<String>>(mut self, rust_taget: S) -> Self {
-        self.rust_target = Some(rust_taget.into());
+    /// Sets the rust target that will be searched for in GitHub releases.
+    ///
+    /// # Arguments
+    ///
+    /// * `rust_target` - The Rust target, e.g.: i686-unknown-freebsd.
+    ///
+    /// # Returns
+    ///
+    /// The modified `GithubUpdater` builder instance.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use github_updater::GithubUpdater;
+    ///
+    /// let updater_builder = GithubUpdater::builder()
+    ///     .with_rust_target("i686-unknown-freebsd")
+    ///     .build();
+    /// ```
+    pub fn with_rust_target<S: Into<String>>(mut self, rust_target: S) -> Self {
+        self.rust_target = Some(rust_target.into());
 
         self
     }
 
+    /// Sets information about the GitHub repository on which the releases are located.
+    ///
+    /// # Arguments
+    ///
+    /// * `repository_owner` - The GitHub repository owner, e.g.: `Asthowen`.
+    /// * `repository_name` - The GitHub repository name, e.g.: `AFetch`.
+    ///
+    /// # Returns
+    ///
+    /// The modified `GithubUpdater` builder instance.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use github_updater::GithubUpdater;
+    ///
+    /// let updater_builder = GithubUpdater::builder()
+    ///     .with_repository_infos("Asthowen", "AFetch")
+    ///     .build();
+    /// ```
     pub fn with_repository_infos<S: Into<String>>(
         mut self,
         repository_owner: S,
@@ -99,12 +247,50 @@ impl GithubUpdater {
         self
     }
 
+    /// Sets the file download folder path.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The download folder path, e.g.: `~/Downloads/`.
+    ///
+    /// # Returns
+    ///
+    /// The modified `GithubUpdater` builder instance.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use github_updater::GithubUpdater;
+    ///
+    /// let updater_builder = GithubUpdater::builder()
+    ///     .with_download_path("~/Downloads/")
+    ///     .build();
+    /// ```
     pub fn with_download_path<P: AsRef<Path>>(mut self, path: &P) -> Self {
         self.download_path = Some(path.as_ref().to_owned());
 
         self
     }
 
+    /// Sets the extension of the downloaded file.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The extension, e.g.: `exe`, `so`, `dll`.
+    ///
+    /// # Returns
+    ///
+    /// The modified `GithubUpdater` builder instance.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use github_updater::GithubUpdater;
+    ///
+    /// let updater_builder = GithubUpdater::builder()
+    ///     .with_file_extension("so")
+    ///     .build();
+    /// ```
     pub fn with_file_extension<S: Into<String>>(mut self, extension: S) -> Self {
         self.file_extension = Some(extension.into());
 
@@ -132,7 +318,7 @@ impl GithubUpdater {
             return Err(BuilderMissingElement("download_path".to_owned()));
         }
 
-        self.builded = true;
+        self.built = true;
 
         Ok(self)
     }
@@ -145,13 +331,39 @@ impl GithubUpdater {
         format!("{}{}", app_name, extension)
     }
 
+    async fn get_current_version(&self, app_name: &str, path: &Path) -> Option<String> {
+        let path_version_file: PathBuf = path.join(format!("binary-version-{}.txt", app_name));
+        if path_version_file.exists() {
+            tokio::fs::read_to_string(&path_version_file).await.ok()
+        } else {
+            None
+        }
+    }
+
+    /// Retrieve the latest version of the release from GitHub.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `Err` if the builder is not initialized (`BuilderNotInitialized` error).
+    ///
+    /// But return (`UpdateError` error) if an error occurs while making the API request, if an error occurs while parsing the response JSON, if an error occurs while retrieving the release URL, or if no URL matching the pattern is found.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the fetch is successful.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// updater_builder.fetch_last_release().await;
+    /// ```
     pub async fn fetch_last_release(&mut self) -> Result<(), UpdateError> {
-        if !self.builded {
+        if !self.built {
             return Err(BuilderNotInitialized.into());
         }
 
-        let repository_infos = self.repository_infos.as_ref().unwrap();
-        let url = format!(
+        let repository_infos: &(String, String) = self.repository_infos.as_ref().unwrap();
+        let url: String = format!(
             "https://api.github.com/repos/{}/{}/releases/latest",
             repository_infos.0, repository_infos.1
         );
@@ -174,7 +386,7 @@ impl GithubUpdater {
             .map(|asset| asset.browser_download_url.to_owned())
             .collect();
 
-        let mut pattern = self.pattern.clone().unwrap();
+        let mut pattern: String = self.pattern.clone().unwrap_or_default();
         if let Some(app_name) = &self.app_name {
             pattern = pattern.replace("{app_name}", app_name);
         }
@@ -184,7 +396,8 @@ impl GithubUpdater {
         pattern = pattern.replace("{app_version}", &response.name);
         self.app_version = Some(response.name);
 
-        let matching_value = asset_urls.iter().find(|&value| value.contains(&pattern));
+        let matching_value: Option<&String> =
+            asset_urls.iter().find(|&value| value.contains(&pattern));
         if let Some(value) = matching_value {
             let api_url: &String = match response
                 .assets
@@ -209,15 +422,31 @@ impl GithubUpdater {
         Ok(())
     }
 
+    /// Checks if an update is needed for the GitHub release.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `Err` if the builder is not initialized (`BuilderNotInitialized` error).
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(true)` if an update is needed.
+    /// - `Ok(false)` if no update is needed.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let update_is_needed = updater_builder.check_if_update_is_needed().await;
+    /// ```
     async fn check_if_update_is_needed(&mut self) -> Result<bool, UpdateError> {
-        if !self.builded {
+        if !self.built {
             return Err(BuilderNotInitialized.into());
         }
 
-        let path = self.download_path.as_ref().ok_or(BuilderNotInitialized)?;
-        let current_version = self.app_version.as_ref().ok_or(BuilderNotInitialized)?;
-        let app_name = self.app_name.as_ref().ok_or(BuilderNotInitialized)?;
-        let path_version_file = path.join(format!("binary-version-{}.txt", app_name));
+        let path: &PathBuf = self.download_path.as_ref().ok_or(BuilderNotInitialized)?;
+        let current_version: &String = self.app_version.as_ref().ok_or(BuilderNotInitialized)?;
+        let app_name: &String = self.app_name.as_ref().ok_or(BuilderNotInitialized)?;
+        let path_version_file: PathBuf = path.join(format!("binary-version-{}.txt", app_name));
 
         if !path_version_file.exists() || !path.join(self.generate_file_name(app_name)).exists() {
             return Ok(true);
@@ -228,8 +457,25 @@ impl GithubUpdater {
         Ok(previous_version.trim() != current_version)
     }
 
-    pub async fn force_update(&mut self) -> Result<(), UpdateError> {
-        if !self.builded {
+    /// Force download the latest GitHub release.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `Err` if the builder is not initialized (`BuilderNotInitialized` error).
+    ///
+    /// But return (`UpdateError` error) if an error occurs while fetching the last release, if an error occurs while retrieving the release URL, if no version of the application is found, if an error occurs during file operations, or if an error occurs while downloading the file.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the download information (`DownloadInfos`) if the update is successful.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let download_infos = updater_builder.force_update().await?;
+    /// ```
+    pub async fn force_update(&mut self) -> Result<DownloadInfos, UpdateError> {
+        if !self.built {
             return Err(BuilderNotInitialized.into());
         }
 
@@ -237,17 +483,21 @@ impl GithubUpdater {
             self.fetch_last_release().await?;
         }
 
-        let app_name = self.app_name.as_ref().ok_or(BuilderNotInitialized)?;
-        let path = self.download_path.as_ref().ok_or(BuilderNotInitialized)?;
-        let binary_path = path.join(app_name);
-        let release_url = self.release_url.as_ref().ok_or(UpdateError(
+        let app_name: &String = self.app_name.as_ref().ok_or(BuilderNotInitialized)?;
+        let path: &PathBuf = self.download_path.as_ref().ok_or(BuilderNotInitialized)?;
+        let binary_path: PathBuf = path.join(app_name);
+        let release_url: &String = self.release_url.as_ref().ok_or(UpdateError(
             "An error occurred while retrieving the release URL.".to_owned(),
         ))?;
+        let previous_version: Option<String> = self.get_current_version(app_name, path).await;
+        let new_version: String = self
+            .app_version
+            .as_deref()
+            .ok_or_else(|| UpdateError("No version of the application found.".to_owned()))?
+            .to_owned();
 
-        if path.exists() {
-            if binary_path.exists() {
-                tokio::fs::remove_file(binary_path).await?;
-            }
+        if path.exists() && binary_path.exists() {
+            tokio::fs::remove_file(binary_path).await?;
         } else {
             tokio::fs::create_dir_all(path).await?;
         }
@@ -271,23 +521,45 @@ impl GithubUpdater {
             file.write_all(&body).await?;
 
             // Write version in file
-            if let Some(app_version) = &self.app_version {
-                let mut file =
-                    File::create(path.join(format!("binary-version-{}.txt", app_name))).await?;
-                file.write_all(app_version.as_bytes()).await?;
-            }
+            let mut file: File =
+                File::create(path.join(format!("binary-version-{}.txt", app_name))).await?;
+            file.write_all(new_version.as_bytes()).await?;
         } else {
             return Err(UpdateError(format!(
                 "An error occurred while downloading the file, HTTP code: {}",
                 response.status()
             )));
         }
+        let forced_update: bool = self.forced_update;
+        self.forced_update = true;
 
-        Ok(())
+        Ok(DownloadInfos {
+            previous_version,
+            new_version,
+            has_been_updated: true,
+            forced_update,
+        })
     }
 
-    pub async fn update_if_needed(&mut self) -> Result<(), UpdateError> {
-        if !self.builded {
+    /// Check and download, if necessary, the latest version of the release on GitHub.
+    ///
+    /// # Errors
+    ///
+    /// Returns an `Err` if the builder is not initialized (`BuilderNotInitialized` error).
+    ///
+    /// But return (`UpdateError` error) if an error occurs while fetching the last release, if an error occurs while retrieving the release URL, if no version of the application is found, if an error occurs during file operations, or if an error occurs while downloading the file.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the download information (`DownloadInfos`) if the update is successful.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let download_infos = updater_builder.force_update().await?;
+    /// ```
+    pub async fn update_if_needed(&mut self) -> Result<DownloadInfos, UpdateError> {
+        if !self.built {
             return Err(BuilderNotInitialized.into());
         }
 
@@ -295,9 +567,19 @@ impl GithubUpdater {
         self.need_refresh = false;
 
         if self.check_if_update_is_needed().await.unwrap_or(false) {
+            self.forced_update = false;
             return self.force_update().await;
         }
 
-        Ok(())
+        let path: &PathBuf = self.download_path.as_ref().ok_or(BuilderNotInitialized)?;
+        let app_name: &String = self.app_name.as_ref().ok_or(BuilderNotInitialized)?;
+        let current_version: Option<String> = self.get_current_version(app_name, path).await;
+
+        Ok(DownloadInfos {
+            previous_version: current_version.clone(),
+            new_version: current_version.unwrap_or_default(),
+            has_been_updated: false,
+            forced_update: false,
+        })
     }
 }
