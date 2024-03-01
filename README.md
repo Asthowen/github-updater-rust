@@ -22,7 +22,7 @@
 ```rust
 let mut updater_builder = GithubUpdater::builder()
     .with_initialized_reqwest_client()
-    .with_download_path(&"/home/user/downloads")
+    .with_download_path(&"~/downloads")
     .with_repository_infos("repository-owner", "repository-name")
     .with_app_name("app-name")
     .with_rust_target("i686-unknown-linux-musl")

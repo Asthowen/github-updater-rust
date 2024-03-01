@@ -9,7 +9,9 @@ readme = "README.md"
 license = "GPL-3.0"
 
 [dependencies]
-tokio = { version = "1.28.2", default-features = false, features = ["fs"]}
-reqwest = { version = "0.11.18", features = ["json"] }
-serde = { version = "1.0.164", features = ["derive"] }
-serde_json = "1.0.97"
+tokio = { version = "1.36.0", default-features = false, features = ["fs"]}
+reqwest = { version = "0.11.24", features = ["json"] }
+serde = { version = "1.0.197", features = ["derive"] }
+serde_json = "1.0.114"
+base64 = "0.21.7"
+md-5 = "0.10.6"

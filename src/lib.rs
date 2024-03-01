@@ -1,10 +1,13 @@
 use crate::errors::builder_not_initialized::BuilderNotInitialized;
 use crate::errors::update_error::UpdateError;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use errors::builder_missing_element::BuilderMissingElement;
+use md5::Digest;
 use serde::{Deserialize, Serialize};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub mod errors;
 
@@ -331,12 +334,16 @@ impl GithubUpdater {
         format!("{}{}", app_name, extension)
     }
 
-    async fn get_current_version(&self, app_name: &str, path: &Path) -> Option<String> {
+    async fn get_current_version(
+        &self,
+        app_name: &str,
+        path: &Path,
+    ) -> Result<Option<String>, UpdateError> {
         let path_version_file: PathBuf = path.join(format!("binary-version-{}.txt", app_name));
         if path_version_file.exists() {
-            tokio::fs::read_to_string(&path_version_file).await.ok()
+            Ok(Some(tokio::fs::read_to_string(&path_version_file).await?))
         } else {
-            None
+            Ok(None)
         }
     }
 
@@ -362,7 +369,10 @@ impl GithubUpdater {
             return Err(BuilderNotInitialized.into());
         }
 
-        let repository_infos: &(String, String) = self.repository_infos.as_ref().unwrap();
+        let repository_infos: &(String, String) = self
+            .repository_infos
+            .as_ref()
+            .ok_or(BuilderNotInitialized)?;
         let url: String = format!(
             "https://api.github.com/repos/{}/{}/releases/latest",
             repository_infos.0, repository_infos.1
@@ -370,8 +380,8 @@ impl GithubUpdater {
 
         let mut build_request = self
             .reqwest_client
-            .clone()
-            .unwrap()
+            .as_ref()
+            .ok_or(BuilderNotInitialized)?
             .get(&url)
             .header("User-Agent", "GitHub-Updater")
             .header("Accept", "application/vnd.github.v3+json");
@@ -386,33 +396,33 @@ impl GithubUpdater {
             .map(|asset| asset.browser_download_url.to_owned())
             .collect();
 
-        let mut pattern: String = self.pattern.clone().unwrap_or_default();
+        let mut pattern: String = self
+            .pattern
+            .as_ref()
+            .ok_or(BuilderNotInitialized)?
+            .replace("{app_version}", &response.name);
         if let Some(app_name) = &self.app_name {
             pattern = pattern.replace("{app_name}", app_name);
         }
         if let Some(rust_target) = &self.rust_target {
             pattern = pattern.replace("{rust_target}", rust_target);
         }
-        pattern = pattern.replace("{app_version}", &response.name);
         self.app_version = Some(response.name);
 
         let matching_value: Option<&String> =
             asset_urls.iter().find(|&value| value.contains(&pattern));
         if let Some(value) = matching_value {
-            let api_url: &String = match response
+            let api_url: String = response
                 .assets
                 .iter()
                 .find(|asset| &asset.browser_download_url == value)
-            {
-                Some(asset) => &asset.url,
-                None => {
-                    return Err(UpdateError(
-                        "An error occurred while retrieving the release URL.".to_owned(),
-                    ));
-                }
-            };
+                .map(|asset| &asset.url)
+                .ok_or_else(|| {
+                    UpdateError("An error occurred while retrieving the release URL.".to_owned())
+                })?
+                .clone();
 
-            self.release_url = Some(api_url).cloned();
+            self.release_url = Some(api_url);
         } else {
             return Err(UpdateError(
                 "No URL matching the pattern entered was found.".to_owned(),
@@ -486,26 +496,27 @@ impl GithubUpdater {
         let app_name: &String = self.app_name.as_ref().ok_or(BuilderNotInitialized)?;
         let path: &PathBuf = self.download_path.as_ref().ok_or(BuilderNotInitialized)?;
         let binary_path: PathBuf = path.join(app_name);
+        let old_file: PathBuf = path.join(format!("old_{}", app_name));
         let release_url: &String = self.release_url.as_ref().ok_or(UpdateError(
             "An error occurred while retrieving the release URL.".to_owned(),
         ))?;
-        let previous_version: Option<String> = self.get_current_version(app_name, path).await;
+        let previous_version: Option<String> = self.get_current_version(app_name, path).await?;
         let new_version: String = self
             .app_version
-            .as_deref()
+            .as_ref()
             .ok_or_else(|| UpdateError("No version of the application found.".to_owned()))?
             .to_owned();
 
         if path.exists() && binary_path.exists() {
-            tokio::fs::remove_file(binary_path).await?;
+            tokio::fs::rename(&binary_path, &old_file).await?;
         } else {
             tokio::fs::create_dir_all(path).await?;
         }
 
         let mut build_request = self
             .reqwest_client
-            .clone()
-            .unwrap()
+            .as_ref()
+            .ok_or(BuilderNotInitialized)?
             .get(release_url)
             .header("User-Agent", "GitHub-Updater")
             .header("Accept", "application/octet-stream");
@@ -514,22 +525,66 @@ impl GithubUpdater {
         }
 
         let response = build_request.send().await?;
-        if response.status().is_success() {
-            let mut file: File =
-                File::create(&path.join(self.generate_file_name(app_name))).await?;
-            let body = response.bytes().await?;
-            file.write_all(&body).await?;
-
-            // Write version in file
-            let mut file: File =
-                File::create(path.join(format!("binary-version-{}.txt", app_name))).await?;
-            file.write_all(new_version.as_bytes()).await?;
-        } else {
+        if !response.status().is_success() {
             return Err(UpdateError(format!(
                 "An error occurred while downloading the file, HTTP code: {}",
                 response.status()
             )));
         }
+
+        let file_path = path.join(self.generate_file_name(app_name));
+
+        let github_md5: String = response
+            .headers()
+            .get("content-md5")
+            .ok_or_else(|| UpdateError("The content-md5 header is absent.".to_owned()))?
+            .to_str()?
+            .to_owned();
+        let content_length: u64 = response
+            .headers()
+            .get("content-length")
+            .ok_or_else(|| UpdateError("The content-length header is absent.".to_owned()))?
+            .to_str()?
+            .parse::<u64>()?;
+
+        let mut file: File = File::create(&file_path).await?;
+        let body = response.bytes().await?;
+        file.write_all(&body).await?;
+
+        // Verify file integrity with md5 and content-size
+        let mut hasher = md5::Md5::new();
+        let mut file: File = File::open(&file_path).await?;
+        let mut content: Vec<u8> = Vec::new();
+        file.read_to_end(&mut content).await?;
+        hasher.update(&content);
+
+        let file_md5: String = STANDARD.encode(hasher.finalize());
+        let file_size = file.metadata().await?.size();
+
+        if github_md5 != file_md5 || content_length != file_size {
+            tokio::fs::remove_file(&file_path).await?;
+            if old_file.exists() {
+                tokio::fs::rename(&old_file, &file_path).await?;
+            }
+            if content_length != file_size {
+                return Err(UpdateError(
+                    "File corrupted: Incorrect file size detected.".to_owned(),
+                ));
+            }
+            return Err(UpdateError(
+                "File corrupted: MD5 checksum does not match.".to_owned(),
+            ));
+        }
+
+        if old_file.exists() {
+            tokio::fs::remove_file(&old_file).await?;
+        }
+
+        // Write version in file
+        let mut file: File =
+            File::create(path.join(format!("binary-version-{}.txt", app_name))).await?;
+        file.write_all(new_version.as_bytes()).await?;
+
         let forced_update: bool = self.forced_update;
         self.forced_update = true;
 
@@ -573,7 +628,7 @@ impl GithubUpdater {
 
         let path: &PathBuf = self.download_path.as_ref().ok_or(BuilderNotInitialized)?;
         let app_name: &String = self.app_name.as_ref().ok_or(BuilderNotInitialized)?;
-        let current_version: Option<String> = self.get_current_version(app_name, path).await;
+        let current_version: Option<String> = self.get_current_version(app_name, path).await?;
 
         Ok(DownloadInfos {
             previous_version: current_version.clone(),
