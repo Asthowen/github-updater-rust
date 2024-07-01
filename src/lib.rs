@@ -3,8 +3,9 @@ use crate::errors::update_error::UpdateError;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use errors::builder_missing_element::BuilderMissingElement;
 use md5::Digest;
+use reqwest::header::{HeaderMap, HeaderValue};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -113,7 +114,19 @@ impl GithubUpdater {
     ///     .build();
     /// ```
     pub fn with_initialized_reqwest_client(mut self) -> Self {
-        self.reqwest_client = Some(reqwest::Client::new());
+        self.reqwest_client = Some(
+            Client::builder()
+                .default_headers({
+                    let mut headers = HeaderMap::new();
+                    headers.insert(
+                        reqwest::header::ACCEPT_ENCODING,
+                        HeaderValue::from_static("identity"),
+                    );
+                    headers
+                })
+                .build()
+                .unwrap(),
+        );
 
         self
     }
@@ -534,45 +547,47 @@ impl GithubUpdater {
 
         let file_path = path.join(self.generate_file_name(app_name));
 
-        let github_md5: String = response
+        let github_md5: Option<String> = response
             .headers()
             .get("content-md5")
-            .ok_or_else(|| UpdateError("The content-md5 header is absent.".to_owned()))?
-            .to_str()?
-            .to_owned();
-        let content_length: u64 = response
+            .and_then(|h| h.to_str().ok())
+            .map(String::from);
+        let content_length: usize = response
             .headers()
             .get("content-length")
             .ok_or_else(|| UpdateError("The content-length header is absent.".to_owned()))?
             .to_str()?
-            .parse::<u64>()?;
+            .parse::<usize>()?;
 
         let mut file: File = File::create(&file_path).await?;
         let body = response.bytes().await?;
         file.write_all(&body).await?;
 
         // Verify file integrity with md5 and content-size
-        let mut hasher = md5::Md5::new();
-        let mut file: File = File::open(&file_path).await?;
-        let mut content: Vec<u8> = Vec::new();
-        file.read_to_end(&mut content).await?;
-        hasher.update(&content);
+        let file_md5: Option<String> = if github_md5.is_some() {
+            let mut hasher = md5::Md5::new();
+            let mut file: File = File::open(&file_path).await?;
+            let mut content: Vec<u8> = Vec::new();
+            file.read_to_end(&mut content).await?;
+            hasher.update(&content);
 
-        let file_md5: String = STANDARD.encode(hasher.finalize());
-        let file_size = file.metadata().await?.size();
+            Some(STANDARD.encode(hasher.finalize()))
+        } else {
+            None
+        };
 
-        if github_md5 != file_md5 || content_length != file_size {
+        if github_md5 != file_md5 || content_length != body.len() {
             tokio::fs::remove_file(&file_path).await?;
             if old_file.exists() {
                 tokio::fs::rename(&old_file, &file_path).await?;
             }
-            if content_length != file_size {
+            if github_md5 != file_md5 {
                 return Err(UpdateError(
-                    "File corrupted: Incorrect file size detected.".to_owned(),
+                    "File corrupted: MD5 checksum does not match.".to_owned(),
                 ));
             }
             return Err(UpdateError(
-                "File corrupted: MD5 checksum does not match.".to_owned(),
+                "File corrupted: Incorrect file size detected.".to_owned(),
             ));
         }
 
