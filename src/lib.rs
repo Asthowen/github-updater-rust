@@ -39,7 +39,7 @@ struct Asset {
 
 #[derive(Debug, Clone)]
 pub struct GithubUpdater {
-    reqwest_client: Option<reqwest::Client>,
+    reqwest_client: Option<Client>,
     built: bool,
     pattern: Option<String>,
     app_name: Option<String>,
@@ -48,6 +48,7 @@ pub struct GithubUpdater {
     repository_infos: Option<(String, String)>,
     download_path: Option<PathBuf>,
     file_extension: Option<String>,
+    erase_previous_file: bool,
     release_url: Option<String>,
     app_version: Option<String>,
     need_refresh: bool,
@@ -66,6 +67,7 @@ impl GithubUpdater {
             repository_infos: None,
             download_path: None,
             file_extension: None,
+            erase_previous_file: true,
             release_url: None,
             app_version: None,
             need_refresh: true,
@@ -92,7 +94,7 @@ impl GithubUpdater {
     ///     .with_app_name("afetch")
     ///     .build();
     /// ```
-    pub fn with_reqwest_client(mut self, reqwest_client: reqwest::Client) -> Self {
+    pub fn with_reqwest_client(mut self, reqwest_client: Client) -> Self {
         self.reqwest_client = Some(reqwest_client);
 
         self
@@ -180,6 +182,7 @@ impl GithubUpdater {
     /// ```
     pub fn with_app_name<S: Into<String>>(mut self, app_name: S) -> Self {
         self.app_name = Some(app_name.into());
+
         self
     }
 
@@ -277,9 +280,10 @@ impl GithubUpdater {
     ///
     /// ```rust
     /// use github_updater::GithubUpdater;
+    /// use std::path::Path;
     ///
     /// let updater_builder = GithubUpdater::builder()
-    ///     .with_download_path("~/Downloads/")
+    ///     .with_download_path(&Path::new("~/Downloads/"))
     ///     .build();
     /// ```
     pub fn with_download_path<P: AsRef<Path>>(mut self, path: &P) -> Self {
@@ -313,6 +317,31 @@ impl GithubUpdater {
         self
     }
 
+    /// Disables the erasure of the previous file before downloading a new one.
+    ///
+    /// When this option is enabled, the original file is preserved, and the new file is saved
+    /// with the prefix `new_` added to its filename. Note that the version information
+    /// in the text file will still be updated accordingly.
+    ///
+    /// # Returns
+    ///
+    /// The modified `GithubUpdater` builder instance.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use github_updater::GithubUpdater;
+    ///
+    /// let updater_builder = GithubUpdater::builder()
+    ///     .without_erase_previous_file()
+    ///     .build();
+    /// ```
+    pub fn without_erase_previous_file(mut self) -> Self {
+        self.erase_previous_file = false;
+
+        self
+    }
+
     pub fn build(mut self) -> Result<Self, BuilderMissingElement> {
         if self.reqwest_client.is_none() {
             return Err(BuilderMissingElement("reqwest_client".to_owned()));
@@ -339,7 +368,7 @@ impl GithubUpdater {
         Ok(self)
     }
 
-    fn generate_file_name(&self, app_name: &String) -> String {
+    fn generate_file_name(&self, app_name: &str) -> String {
         let extension: String = self
             .file_extension
             .as_ref()
@@ -374,7 +403,7 @@ impl GithubUpdater {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// updater_builder.fetch_last_release().await;
     /// ```
     pub async fn fetch_last_release(&mut self) -> Result<(), UpdateError> {
@@ -458,7 +487,7 @@ impl GithubUpdater {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let update_is_needed = updater_builder.check_if_update_is_needed().await;
     /// ```
     async fn check_if_update_is_needed(&mut self) -> Result<bool, UpdateError> {
@@ -494,7 +523,7 @@ impl GithubUpdater {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let download_infos = updater_builder.force_update().await?;
     /// ```
     pub async fn force_update(&mut self) -> Result<DownloadInfos, UpdateError> {
@@ -508,8 +537,13 @@ impl GithubUpdater {
 
         let app_name: &String = self.app_name.as_ref().ok_or(BuilderNotInitialized)?;
         let path: &PathBuf = self.download_path.as_ref().ok_or(BuilderNotInitialized)?;
-        let binary_path: PathBuf = path.join(app_name);
-        let old_file: PathBuf = path.join(format!("old_{}", app_name));
+        let file_name = self.generate_file_name(app_name);
+        let previous_file: PathBuf = path.join(&file_name);
+        let new_file: PathBuf = if previous_file.exists() {
+            path.join(format!("new_{}", file_name))
+        } else {
+            previous_file.clone()
+        };
         let release_url: &String = self.release_url.as_ref().ok_or(UpdateError(
             "An error occurred while retrieving the release URL.".to_owned(),
         ))?;
@@ -520,10 +554,11 @@ impl GithubUpdater {
             .ok_or_else(|| UpdateError("No version of the application found.".to_owned()))?
             .to_owned();
 
-        if path.exists() && binary_path.exists() {
-            tokio::fs::rename(&binary_path, &old_file).await?;
-        } else {
+        if !path.exists() {
             tokio::fs::create_dir_all(path).await?;
+        }
+        if new_file.exists() {
+            tokio::fs::remove_file(&new_file).await?;
         }
 
         let mut build_request = self
@@ -545,8 +580,6 @@ impl GithubUpdater {
             )));
         }
 
-        let file_path = path.join(self.generate_file_name(app_name));
-
         let github_md5: Option<String> = response
             .headers()
             .get("content-md5")
@@ -559,14 +592,14 @@ impl GithubUpdater {
             .to_str()?
             .parse::<usize>()?;
 
-        let mut file: File = File::create(&file_path).await?;
+        let mut file: File = File::create(&new_file).await?;
         let body = response.bytes().await?;
         file.write_all(&body).await?;
 
         // Verify file integrity with md5 and content-size
         let file_md5: Option<String> = if github_md5.is_some() {
             let mut hasher = md5::Md5::new();
-            let mut file: File = File::open(&file_path).await?;
+            let mut file: File = File::open(&new_file).await?;
             let mut content: Vec<u8> = Vec::new();
             file.read_to_end(&mut content).await?;
             hasher.update(&content);
@@ -577,10 +610,8 @@ impl GithubUpdater {
         };
 
         if github_md5 != file_md5 || content_length != body.len() {
-            tokio::fs::remove_file(&file_path).await?;
-            if old_file.exists() {
-                tokio::fs::rename(&old_file, &file_path).await?;
-            }
+            tokio::fs::remove_file(&new_file).await?;
+
             if github_md5 != file_md5 {
                 return Err(UpdateError(
                     "File corrupted: MD5 checksum does not match.".to_owned(),
@@ -591,8 +622,9 @@ impl GithubUpdater {
             ));
         }
 
-        if old_file.exists() {
-            tokio::fs::remove_file(&old_file).await?;
+        if self.erase_previous_file && previous_file != new_file {
+            tokio::fs::remove_file(&previous_file).await?;
+            tokio::fs::rename(&new_file, &previous_file).await?;
         }
 
         // Write version in file
@@ -625,7 +657,7 @@ impl GithubUpdater {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let download_infos = updater_builder.force_update().await?;
     /// ```
     pub async fn update_if_needed(&mut self) -> Result<DownloadInfos, UpdateError> {
