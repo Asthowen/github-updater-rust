@@ -1,7 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use md5::Digest;
-use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
+use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs::File;
@@ -387,6 +387,27 @@ impl GithubUpdater {
         }
     }
 
+    async fn send_request(&self, url: &str, accept: &str) -> Result<Response, GithubUpdaterError> {
+        let mut build_request = self
+            .reqwest_client
+            .as_ref()
+            .ok_or(GithubUpdaterError::BuilderNotInitialized)?
+            .get(url)
+            .header("User-Agent", "GitHub-Updater")
+            .header("Accept", accept);
+        if let Some(token) = &self.github_token {
+            build_request = build_request.header("Authorization", format!("token {token}"));
+        }
+        let response = build_request.send().await?;
+        if !response.status().is_success() {
+            return Err(GithubUpdaterError::FetchError(format!(
+                "An error occurred while downloading the file, HTTP code: {}",
+                response.status()
+            )));
+        }
+        Ok(response)
+    }
+
     /// Retrieve the latest version of the release from GitHub.
     ///
     /// # Errors
@@ -417,19 +438,11 @@ impl GithubUpdater {
             "https://api.github.com/repos/{}/{}/releases/latest",
             repository_infos.0, repository_infos.1
         );
-
-        let mut build_request = self
-            .reqwest_client
-            .as_ref()
-            .ok_or(GithubUpdaterError::BuilderNotInitialized)?
-            .get(&url)
-            .header("User-Agent", "GitHub-Updater")
-            .header("Accept", "application/vnd.github.v3+json");
-        if let Some(token) = &self.github_token {
-            build_request = build_request.header("Authorization", format!("token {token}"));
-        }
-
-        let response = build_request.send().await?.json::<Release>().await?;
+        let response = self
+            .send_request(&url, "application/vnd.github.v3+json")
+            .await?
+            .json::<Release>()
+            .await?;
         let asset_urls: Vec<String> = response
             .assets
             .iter()
@@ -578,25 +591,9 @@ impl GithubUpdater {
             tokio::fs::remove_file(&new_file).await?;
         }
 
-        let mut build_request = self
-            .reqwest_client
-            .as_ref()
-            .ok_or(GithubUpdaterError::BuilderNotInitialized)?
-            .get(release_url)
-            .header("User-Agent", "GitHub-Updater")
-            .header("Accept", "application/octet-stream");
-        if let Some(token) = &self.github_token {
-            build_request = build_request.header("Authorization", format!("token {token}"));
-        }
-
-        let response = build_request.send().await?;
-        if !response.status().is_success() {
-            return Err(GithubUpdaterError::FetchError(format!(
-                "An error occurred while downloading the file, HTTP code: {}",
-                response.status()
-            )));
-        }
-
+        let response = self
+            .send_request(release_url, "application/octet-stream")
+            .await?;
         let github_md5: Option<String> = response
             .headers()
             .get("content-md5")
@@ -632,14 +629,11 @@ impl GithubUpdater {
         if github_md5 != file_md5 || content_length != body.len() {
             tokio::fs::remove_file(&new_file).await?;
 
-            if github_md5 != file_md5 {
-                return Err(GithubUpdaterError::FetchError(
-                    "File corrupted: MD5 checksum does not match.".to_owned(),
-                ));
-            }
-            return Err(GithubUpdaterError::FetchError(
-                "File corrupted: Incorrect file size detected.".to_owned(),
-            ));
+            return Err(GithubUpdaterError::FetchError(if github_md5 == file_md5 {
+                "File corrupted: Incorrect file size detected.".to_owned()
+            } else {
+                "File corrupted: MD5 checksum does not match.".to_owned()
+            }));
         }
 
         if self.erase_previous_file && previous_file != new_file {
