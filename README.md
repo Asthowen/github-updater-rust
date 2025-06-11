@@ -20,31 +20,37 @@
 ## Basic usage
 ### Create builder
 ```rust
-let mut updater_builder = GithubUpdater::builder()
-    .with_initialized_reqwest_client()
-    .with_download_path(&"~/downloads")
-    .with_repository_infos("repository-owner", "repository-name")
-    .with_app_name("app-name")
-    .with_rust_target("i686-unknown-linux-musl")
-    .with_release_file_name_pattern("{app_name}-{app_version}-{rust_target}")
-    .with_file_extension("exe")
-    .with_github_token("")
-    .build()
-    .unwrap();
+fn main() {
+    let mut updater_builder = GithubUpdater::builder()
+        .with_initialized_reqwest_client()
+        .with_download_path(&"~/downloads")
+        .with_repository_infos("repository-owner", "repository-name")
+        .with_app_name("app-name")
+        .with_rust_target("i686-unknown-linux-musl")
+        .with_release_file_name_pattern("{app_name}-{app_version}-{rust_target}")
+        .with_file_extension("exe")
+        .with_github_token("")
+        .build()
+        .unwrap();
+}
 ```
 
 ### Download update if needed
 ```rust
-updater_builder.update_if_needed().await?;
+fn main() {
+    updater_builder.update_if_needed().await?;
+}
 ```
 
 ### Force update
 ```rust
-updater_builder.force_update().await?;
+fn main() {
+    updater_builder.force_update().await?;
+}
 ```
 
 ## Contributors
 [<img width="45" src="https://avatars.githubusercontent.com/u/59535754?v=4" alt="Asthowen">](https://github.com/Asthowen)
 
 ## License
-**[github-updater-rust](https://github.com/Asthowen/github-updater-rust) | [GNU General Public License v3.0](https://github.com/Asthowen/AFetch/blob/main/LICENSE)**
+**[github-updater-rust](https://github.com/Asthowen/github-updater-rust) | [GNU General Public License v3.0](https://github.com/Asthowen/github-updater-rust/blob/main/LICENSE)**
