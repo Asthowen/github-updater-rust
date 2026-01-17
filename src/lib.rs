@@ -289,10 +289,10 @@ impl GithubUpdaterBuilder {
     /// use github_updater::GithubUpdater;
     ///
     /// let updater_builder = GithubUpdater::builder()
-    ///     .erase_previous_file()
+    ///     .preserve_previous_file()
     ///     .build()?;
     /// ```
-    pub fn erase_previous_file(mut self) -> Self {
+    pub fn preserve_previous_file(mut self) -> Self {
         self.erase_previous_file = Some(false);
 
         self
