@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -34,13 +34,14 @@ jobs:
 
       - name: Generate changelog
         id: changelog
-        uses: jaywcjlove/changelog-generator@v2.2.2
+        uses: jaywcjlove/changelog-generator@32f6f901f132c8c979d6125868d4757ab6bd8be4
         if: env.previous_tag && env.current_tag
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           filter: '[R|r]elease[d]\s+[v|V]\d(\.\d+){0,2}'
           show-emoji: false
           base-ref: ${{ env.previous_tag }}
+          head-ref: ${{ env.current_tag }}
           template: |
             ## Bugs
             {{fix}}
