@@ -1,8 +1,5 @@
 use futures_util::TryStreamExt;
-use reqwest::{
-    Client, Response, header,
-    header::{HeaderMap, HeaderValue},
-};
+use reqwest::{Client, Response, header, header::HeaderValue};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -55,6 +52,7 @@ pub struct GithubUpdaterBuilder {
 #[derive(Debug, Clone)]
 pub struct GithubUpdater {
     reqwest_client: Client,
+    github_token: Option<HeaderValue>,
     pattern: String,
     app_name: String,
     rust_target: Option<String>,
@@ -316,27 +314,14 @@ impl GithubUpdaterBuilder {
             .app_name
             .ok_or_else(|| GithubUpdaterError::BuilderMissingField("app_name"))?;
 
-        let github_token = self
-            .github_token
-            .as_deref()
-            .map(|token| HeaderValue::from_str(&format!("Bearer {token}")))
-            .transpose()
-            .map_err(|_| GithubUpdaterError::InvalidGithubToken)?;
-
         Ok(GithubUpdater {
-            reqwest_client: self.reqwest_client.unwrap_or_else(|| {
-                let mut headers =
-                    HeaderMap::with_capacity(1 + if self.github_token.is_some() { 1 } else { 0 });
-                headers.insert(
-                    header::USER_AGENT,
-                    HeaderValue::from_static("GitHub-Updater"),
-                );
-                if let Some(github_token) = github_token {
-                    headers.insert(header::AUTHORIZATION, github_token);
-                }
-
-                Client::builder().default_headers(headers).build().unwrap()
-            }),
+            reqwest_client: self.reqwest_client.unwrap_or_default(),
+            github_token: self
+                .github_token
+                .as_deref()
+                .map(|token| HeaderValue::from_str(&format!("Bearer {token}")))
+                .transpose()
+                .map_err(|_| GithubUpdaterError::InvalidGithubToken)?,
             pattern: self.pattern.unwrap_or_default(),
             file_name: match self.file_extension {
                 Some(extension) => format!("{app_name}{extension}"),
@@ -434,12 +419,16 @@ impl GithubUpdater {
     }
 
     async fn send_request(&self, url: &str, accept: &str) -> Result<Response, GithubUpdaterError> {
-        let response = self
+        let mut request_builder = self
             .reqwest_client
             .get(url)
             .header(header::ACCEPT, accept)
-            .send()
-            .await?;
+            .header(header::USER_AGENT, "GitHub-Updater");
+        if let Some(github_token) = &self.github_token {
+            request_builder = request_builder.header(header::AUTHORIZATION, github_token);
+        }
+
+        let response = request_builder.send().await?;
         if !response.status().is_success() {
             return Err(GithubUpdaterError::FetchError(format!(
                 "An error occurred while downloading the file, HTTP code: {}",
