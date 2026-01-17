@@ -10,8 +10,8 @@ license = "GPL-3.0"
 publish = false
 
 [dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-tokio = { version = "1", default-features = false, features = ["fs", "io-util"] }
+reqwest = { version = "0.13", features = ["json", "stream"] }
+tokio = { version = "1", features = ["fs", "io-util"] }
 serde = { version = "1.0", features = ["derive"] }
-base64 = "0.22"
-md-5 = "0.10"
+futures-util = "0.3"
+sha2 = "0.10"

@@ -18,34 +18,32 @@
 </div>
 
 ## Basic usage
-### Create builder
+### Create client
 ```rust
 fn main() {
-    let mut updater_builder = GithubUpdater::builder()
-        .with_initialized_reqwest_client()
-        .with_download_path(&"~/downloads")
-        .with_repository_infos("repository-owner", "repository-name")
-        .with_app_name("app-name")
-        .with_rust_target("i686-unknown-linux-musl")
-        .with_release_file_name_pattern("{app_name}-{app_version}-{rust_target}")
-        .with_file_extension("exe")
-        .with_github_token("")
-        .build()
-        .unwrap();
+    let client = GithubUpdater::builder()
+        .download_path("~/downloads")
+        .repository_info("repository-owner", "repository-name")
+        .app_name("app-name")
+        .rust_target("i686-unknown-linux-musl")
+        .release_file_name_pattern("{app_name}-{app_version}-{rust_target}")
+        .file_extension("exe")
+        .github_token("token")
+        .build()?;
 }
 ```
 
 ### Download update if needed
 ```rust
 fn main() {
-    updater_builder.update_if_needed().await?;
+    client.update().await?;
 }
 ```
 
 ### Force update
 ```rust
 fn main() {
-    updater_builder.force_update().await?;
+    client.force_update().await?;
 }
 ```
 

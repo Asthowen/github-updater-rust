@@ -3,19 +3,19 @@ use std::num::ParseIntError;
 
 #[derive(Debug)]
 pub enum GithubUpdaterError {
-    BuilderNotInitialized,
     BuilderMissingField(&'static str),
     FetchError(String),
     IoError(std::io::Error),
     ToStrError(ToStrError),
     ParseIntError(ParseIntError),
     ReqwestError(reqwest::Error),
+    InvalidGithubToken,
 }
 
 impl std::fmt::Display for GithubUpdaterError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::BuilderNotInitialized => write!(f, "Builder not initialized"),
+            Self::InvalidGithubToken => write!(f, "The GitHub token is invalid."),
             Self::BuilderMissingField(field) => write!(f, "Missing required field: {field}"),
             Self::FetchError(message) => write!(f, "Fetch error: {message}"),
             Self::IoError(error) => write!(f, "IO error: {error}"),
