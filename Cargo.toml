@@ -1,6 +1,6 @@
 [package]
 name = "github-updater"
-version = "0.0.6"
+version = "0.1.0"
 authors = ["Asthowen<contact@asthowen.fr>"]
 edition = "2024"
 description = "A small library to update rust binaries from GitHub releases."
