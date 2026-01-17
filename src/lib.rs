@@ -324,7 +324,7 @@ impl GithubUpdaterBuilder {
                 .map_err(|_| GithubUpdaterError::InvalidGithubToken)?,
             pattern: self.pattern.unwrap_or_default(),
             file_name: match self.file_extension {
-                Some(extension) => format!("{app_name}{extension}"),
+                Some(extension) => format!("{app_name}.{extension}"),
                 None => app_name.clone(),
             },
             app_name,
