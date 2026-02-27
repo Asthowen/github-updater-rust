@@ -1,16 +1,19 @@
+use std::path::{Path, PathBuf};
+
 use futures_util::TryStreamExt;
 use reqwest::{Client, Response, header, header::HeaderValue};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 mod error;
+
 pub use error::GithubUpdaterError;
 
 /// Download information struct.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged, rename_all = "camelCase")]
 pub enum UpdateResult {
     Updated {
         from: Option<String>,
@@ -37,6 +40,7 @@ struct Asset {
 }
 
 #[derive(Default)]
+#[must_use]
 pub struct GithubUpdaterBuilder {
     reqwest_client: Option<Client>,
     github_token: Option<String>,
@@ -299,20 +303,17 @@ impl GithubUpdaterBuilder {
     }
 
     pub fn build(self) -> Result<GithubUpdater, GithubUpdaterError> {
-        if let Some(pattern) = &self.pattern {
-            if pattern.contains("app_name") && self.app_name.is_none() {
-                return Err(GithubUpdaterError::BuilderMissingField("rust_target"));
-            }
-            if pattern.contains("rust_target") && self.rust_target.is_none() {
-                return Err(GithubUpdaterError::BuilderMissingField("rust_target"));
-            }
-        } else {
-            return Err(GithubUpdaterError::BuilderMissingField("pattern"));
-        }
-
         let app_name = self
             .app_name
-            .ok_or_else(|| GithubUpdaterError::BuilderMissingField("app_name"))?;
+            .ok_or_else(|| GithubUpdaterError::MissingBuilderField("app_name"))?;
+
+        let pattern = self
+            .pattern
+            .as_ref()
+            .ok_or(GithubUpdaterError::MissingBuilderField("pattern"))?;
+        if pattern.contains("rust_target") && self.rust_target.is_none() {
+            return Err(GithubUpdaterError::MissingBuilderField("rust_target"));
+        }
 
         Ok(GithubUpdater {
             reqwest_client: self.reqwest_client.unwrap_or_default(),
@@ -321,7 +322,7 @@ impl GithubUpdaterBuilder {
                 .as_deref()
                 .map(|token| HeaderValue::from_str(&format!("Bearer {token}")))
                 .transpose()
-                .map_err(|_| GithubUpdaterError::InvalidGithubToken)?,
+                .expect("GitHub token should always be valid ASCII"),
             pattern: self.pattern.unwrap_or_default(),
             file_name: match self.file_extension {
                 Some(extension) => format!("{app_name}.{extension}"),
@@ -331,10 +332,10 @@ impl GithubUpdaterBuilder {
             rust_target: self.rust_target,
             repository_info: self
                 .repository_info
-                .ok_or_else(|| GithubUpdaterError::BuilderMissingField("repository_info"))?,
+                .ok_or_else(|| GithubUpdaterError::MissingBuilderField("repository_info"))?,
             download_path: self
                 .download_path
-                .ok_or_else(|| GithubUpdaterError::BuilderMissingField("download_path"))?,
+                .ok_or_else(|| GithubUpdaterError::MissingBuilderField("download_path"))?,
             erase_previous_file: self.erase_previous_file.unwrap_or(true),
         })
     }
@@ -429,11 +430,12 @@ impl GithubUpdater {
         }
 
         let response = request_builder.send().await?;
-        if !response.status().is_success() {
-            return Err(GithubUpdaterError::FetchError(format!(
-                "An error occurred while downloading the file, HTTP code: {}",
-                response.status()
-            )));
+        let status = response.status();
+        if !status.is_success() {
+            return Err(GithubUpdaterError::UnexpectedStatus {
+                url: url.to_owned(),
+                status,
+            });
         }
         Ok(response)
     }
@@ -462,9 +464,7 @@ impl GithubUpdater {
             .into_iter()
             .find(|asset| asset.name.contains(&pattern))
             .ok_or_else(|| {
-                GithubUpdaterError::FetchError(
-                    "Unable to find the URL of the requested release.".to_owned(),
-                )
+                GithubUpdaterError::FetchFailed("Unable to find the URL of the requested release.")
             })
             .map(|mut asset| {
                 asset.digest = asset
@@ -501,14 +501,18 @@ impl GithubUpdater {
         let response = self
             .send_request(&asset.url, "application/octet-stream")
             .await?;
-        let content_length: usize = response
+        let content_length = response
             .headers()
             .get(header::CONTENT_LENGTH)
-            .ok_or_else(|| {
-                GithubUpdaterError::FetchError("The content-length header is absent.".to_owned())
+            .ok_or_else(|| GithubUpdaterError::FetchFailed("The content-length header is absent."))?
+            .to_str()
+            .map_err(|_| {
+                GithubUpdaterError::FetchFailed("The content-length header is not valid UTF-8.")
             })?
-            .to_str()?
-            .parse::<usize>()?;
+            .parse::<usize>()
+            .map_err(|_| {
+                GithubUpdaterError::FetchFailed("The content-length header is invalid.")
+            })?;
 
         let mut file: File = File::create(&download_path).await?;
         let mut file_size = 0;
@@ -531,11 +535,11 @@ impl GithubUpdater {
         if (asset.digest.is_some() && file_digest != asset.digest) || content_length != file_size {
             tokio::fs::remove_file(&download_path).await?;
 
-            return Err(GithubUpdaterError::FetchError(
-                if content_length != file_size {
-                    "File corrupted: Incorrect file size detected.".to_owned()
+            return Err(GithubUpdaterError::FetchFailed(
+                if content_length == file_size {
+                    "File corrupted: SHA-256 checksum does not match."
                 } else {
-                    "File corrupted: SHA-256 checksum does not match.".to_owned()
+                    "File corrupted: Incorrect file size detected."
                 },
             ));
         }
