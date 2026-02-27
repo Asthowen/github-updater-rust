@@ -1,3 +1,5 @@
+#![deny(clippy::all, clippy::pedantic)]
+
 use std::path::{Path, PathBuf};
 
 use futures_util::TryStreamExt;
@@ -11,17 +13,27 @@ mod error;
 
 pub use error::GithubUpdaterError;
 
-/// Download information struct.
+/// Struct containing the result of the update.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged, rename_all = "camelCase")]
 pub enum UpdateResult {
+    /// If a new version of the file has been downloaded.
     Updated {
+        /// Version of the file present before the update.
+        /// May not be available if this is the first download,
+        /// or if the file storing the version has been deleted.
         from: Option<String>,
+        /// Version of the downloaded file.
         to: String,
+        /// If the update was forced (using the [`GithubUpdater::force_update`] method).
         forced: bool,
+        /// If the checksum of the downloaded file have been verified,
+        /// it will still be false for releases prior to GitHub adding the `digest` field.
         checksum_verified: bool,
     },
+    /// If the file was already in the latest version.
     AlreadyUpToDate {
+        /// Version of the file already downloaded.
         version: String,
     },
 }
@@ -39,6 +51,7 @@ struct Asset {
     url: String,
 }
 
+/// A `GithubUpdaterBuilder` can be used to create a `GithubUpdater`.
 #[derive(Default)]
 #[must_use]
 pub struct GithubUpdaterBuilder {
@@ -67,15 +80,11 @@ pub struct GithubUpdater {
 }
 
 impl GithubUpdaterBuilder {
-    /// Sets a Reqwest client that has already been initialized.
+    /// Sets a reqwest client that has already been initialized.
     ///
     /// # Arguments
     ///
-    /// * `reqwest_client` - The already initialized Reqwest client.
-    ///
-    /// # Returns
-    ///
-    /// The modified `GithubUpdaterBuilder` builder instance.
+    /// * `reqwest_client` - The already initialized reqwest client.
     ///
     /// # Example
     ///
@@ -102,10 +111,6 @@ impl GithubUpdaterBuilder {
     ///    * `rust_target`: The Rust target, e.g.: i686-unknown-freebsd.
     ///    * `app_version`: The version of the application.
     ///
-    /// # Returns
-    ///
-    /// The modified `GithubUpdaterBuilder` builder instance.
-    ///
     /// # Example
     ///
     /// ```rust
@@ -126,10 +131,6 @@ impl GithubUpdaterBuilder {
     /// # Arguments
     ///
     /// * `app_name` - The name of the application.
-    ///
-    /// # Returns
-    ///
-    /// The modified `GithubUpdaterBuilder` builder instance.
     ///
     /// # Example
     ///
@@ -152,10 +153,6 @@ impl GithubUpdaterBuilder {
     ///
     /// * `github_token` - The GitHub token to use for authentication.
     ///
-    /// # Returns
-    ///
-    /// The modified `GithubUpdaterBuilder` builder instance.
-    ///
     /// # Example
     ///
     /// ```rust
@@ -176,10 +173,6 @@ impl GithubUpdaterBuilder {
     /// # Arguments
     ///
     /// * `rust_target` - The Rust target, e.g.: i686-unknown-freebsd.
-    ///
-    /// # Returns
-    ///
-    /// The modified `GithubUpdaterBuilder` builder instance.
     ///
     /// # Example
     ///
@@ -202,10 +195,6 @@ impl GithubUpdaterBuilder {
     ///
     /// * `repository_owner` - The GitHub repository owner, e.g.: `Asthowen`.
     /// * `repository_name` - The GitHub repository name, e.g.: `AFetch`.
-    ///
-    /// # Returns
-    ///
-    /// The modified `GithubUpdaterBuilder` builder instance.
     ///
     /// # Example
     ///
@@ -232,10 +221,6 @@ impl GithubUpdaterBuilder {
     ///
     /// * `path` - The download folder path, e.g.: `~/Downloads/`.
     ///
-    /// # Returns
-    ///
-    /// The modified `GithubUpdaterBuilder` builder instance.
-    ///
     /// # Example
     ///
     /// ```rust
@@ -258,10 +243,6 @@ impl GithubUpdaterBuilder {
     ///
     /// * `path` - The extension, e.g.: `exe`, `so`, `dll`.
     ///
-    /// # Returns
-    ///
-    /// The modified `GithubUpdaterBuilder` builder instance.
-    ///
     /// # Example
     ///
     /// ```rust
@@ -280,12 +261,8 @@ impl GithubUpdaterBuilder {
     /// Disables the erasure of the previous file before downloading a new one.
     ///
     /// When this option is enabled, the original file is preserved, and the new file is saved
-    /// with the prefix `new_` added to its filename. Note that the version information
-    /// in the text file will still be updated accordingly.
-    ///
-    /// # Returns
-    ///
-    /// The modified `GithubUpdaterBuilder` builder instance.
+    /// with the prefix `new_` added to its filename. Note that the version in the text file
+    /// will still be updated accordingly.
     ///
     /// # Example
     ///
@@ -302,6 +279,16 @@ impl GithubUpdaterBuilder {
         self
     }
 
+    /// Returns a `GithubUpdater` that uses this `GithubUpdaterBuilder` configuration.
+    ///
+    /// # Errors
+    ///
+    /// This method return an error if `app_name` or `pattern` is not set or
+    /// if `pattern` contain `{rust_target}`, but `rust_target` is not set.
+    ///
+    /// # Panics
+    ///
+    /// This method fails if the GitHub token provided is not valid ASCII.
     pub fn build(self) -> Result<GithubUpdater, GithubUpdaterError> {
         let app_name = self
             .app_name
@@ -349,11 +336,11 @@ impl GithubUpdater {
     ///
     /// # Errors
     ///
-    /// Return (`UpdateError` error) if an error occurs while fetching the latest release, if an error occurs while retrieving the release URL, if no version of the application is found, if an error occurs during file operations, or if an error occurs while downloading the file.
+    /// Returns [`GithubUpdaterError`] if an error occurs while fetching the latest file.
     ///
     /// # Returns
     ///
-    /// A `Result` containing the update information (`UpdateResult`) if the update is successful.
+    /// A [`UpdateResult`] containing the update information if the update is successful.
     ///
     /// # Example
     ///
@@ -367,15 +354,15 @@ impl GithubUpdater {
             .await
     }
 
-    /// Check and download, if necessary, the latest version of the release on GitHub.
+    /// Download, if necessary, the latest version of the release on GitHub.
     ///
     /// # Errors
     ///
-    /// Returns (`UpdateError` error) if an error occurs while fetching the latest release, if an error occurs while retrieving the release URL, if no version of the application is found, if an error occurs during file operations, or if an error occurs while downloading the file.
+    /// Returns [`GithubUpdaterError`] if an error occurs while fetching the latest file.
     ///
     /// # Returns
     ///
-    /// A `Result` containing the update information (`UpdateResult`) if the update is successful.
+    /// A [`UpdateResult`] containing the update information if the update is successful.
     ///
     /// # Example
     ///
