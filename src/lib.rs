@@ -15,9 +15,10 @@ pub use error::GithubUpdaterError;
 
 /// Struct containing the result of the update.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged, rename_all = "camelCase")]
+#[serde(untagged)]
 pub enum UpdateResult {
     /// If a new version of the file has been downloaded.
+    #[serde(rename_all = "camelCase")]
     Updated {
         /// Version of the file present before the update.
         /// May not be available if this is the first download,
