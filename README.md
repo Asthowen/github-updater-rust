@@ -20,7 +20,8 @@
 ## Basic usage
 ### Create client
 ```rust
-fn main() {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = GithubUpdater::builder()
         .download_path("~/downloads")
         .repository_info("repository-owner", "repository-name")
@@ -30,20 +31,28 @@ fn main() {
         .file_extension("exe")
         .github_token("token")
         .build()?;
+
+    Ok(())
 }
 ```
 
 ### Download update if needed
 ```rust
-fn main() {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     client.update().await?;
+
+    Ok(())
 }
 ```
 
 ### Force update
 ```rust
-fn main() {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     client.force_update().await?;
+
+    Ok(())
 }
 ```
 

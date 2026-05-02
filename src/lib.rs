@@ -1,17 +1,19 @@
 #![deny(clippy::all, clippy::pedantic)]
 
+mod error;
+
+pub use error::GithubUpdaterError;
+
 use std::path::{Path, PathBuf};
 
+use base16ct::HexDisplay;
 use futures_util::TryStreamExt;
-use reqwest::{Client, Response, header, header::HeaderValue};
+use reqwest::header::{self, HeaderValue};
+use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-mod error;
-
-pub use error::GithubUpdaterError;
 
 /// Struct containing the result of the update.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -93,9 +95,13 @@ impl GithubUpdaterBuilder {
     /// use github_updater::GithubUpdater;
     /// use reqwest::Client;
     ///
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// let updater_builder = GithubUpdater::builder()
     ///     .reqwest_client(Client::new())
     ///     .build()?;
+    /// #
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn reqwest_client(mut self, reqwest_client: Client) -> Self {
         self.reqwest_client = Some(reqwest_client);
@@ -117,9 +123,13 @@ impl GithubUpdaterBuilder {
     /// ```rust
     /// use github_updater::GithubUpdater;
     ///
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// let updater_builder = GithubUpdater::builder()
     ///     .release_file_name_pattern("{app_name}-{app_version}-{rust_target}")
     ///     .build()?;
+    /// #
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn release_file_name_pattern<S: Into<String>>(mut self, pattern: S) -> Self {
         self.pattern = Some(pattern.into());
@@ -138,9 +148,13 @@ impl GithubUpdaterBuilder {
     /// ```rust
     /// use github_updater::GithubUpdater;
     ///
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// let updater_builder = GithubUpdater::builder()
     ///     .app_name("afetch")
     ///     .build()?;
+    /// #
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn app_name<S: Into<String>>(mut self, app_name: S) -> Self {
         self.app_name = Some(app_name.into());
@@ -159,9 +173,13 @@ impl GithubUpdaterBuilder {
     /// ```rust
     /// use github_updater::GithubUpdater;
     ///
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// let updater_builder = GithubUpdater::builder()
     ///     .github_token("some")
     ///     .build()?;
+    /// #
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn github_token<S: Into<String>>(mut self, github_token: S) -> Self {
         self.github_token = Some(github_token.into());
@@ -180,9 +198,13 @@ impl GithubUpdaterBuilder {
     /// ```rust
     /// use github_updater::GithubUpdater;
     ///
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// let updater_builder = GithubUpdater::builder()
     ///     .rust_target("i686-unknown-freebsd")
     ///     .build()?;
+    /// #
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn rust_target<S: Into<String>>(mut self, rust_target: S) -> Self {
         self.rust_target = Some(rust_target.into());
@@ -202,9 +224,13 @@ impl GithubUpdaterBuilder {
     /// ```rust
     /// use github_updater::GithubUpdater;
     ///
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// let updater_builder = GithubUpdater::builder()
     ///     .repository_info("Asthowen", "AFetch")
     ///     .build()?;
+    /// #
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn repository_info<S1: Into<String>, S2: Into<String>>(
         mut self,
@@ -220,17 +246,20 @@ impl GithubUpdaterBuilder {
     ///
     /// # Arguments
     ///
-    /// * `path` - The download folder path, e.g.: `~/Downloads/`.
+    /// * `path` - The download folder path, e.g.: `~/downloads`.
     ///
     /// # Example
     ///
     /// ```rust
     /// use github_updater::GithubUpdater;
-    /// use std::path::Path;
     ///
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// let updater_builder = GithubUpdater::builder()
-    ///     .download_path("~/downloads/")
+    ///     .download_path("~/downloads")
     ///     .build()?;
+    /// #
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn download_path(mut self, path: impl AsRef<Path>) -> Self {
         self.download_path = Some(path.as_ref().to_owned());
@@ -249,9 +278,13 @@ impl GithubUpdaterBuilder {
     /// ```rust
     /// use github_updater::GithubUpdater;
     ///
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// let updater_builder = GithubUpdater::builder()
     ///     .file_extension("so")
     ///     .build()?;
+    /// #
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn file_extension<S: Into<String>>(mut self, extension: S) -> Self {
         self.file_extension = Some(extension.into());
@@ -270,9 +303,13 @@ impl GithubUpdaterBuilder {
     /// ```rust
     /// use github_updater::GithubUpdater;
     ///
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// let updater_builder = GithubUpdater::builder()
     ///     .preserve_previous_file()
     ///     .build()?;
+    /// #
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn preserve_previous_file(mut self) -> Self {
         self.erase_previous_file = Some(false);
@@ -284,8 +321,8 @@ impl GithubUpdaterBuilder {
     ///
     /// # Errors
     ///
-    /// This method return an error if `app_name` or `pattern` is not set or
-    /// if `pattern` contain `{rust_target}`, but `rust_target` is not set.
+    /// This method return an error if `app_name` or `download_path` or `repository_info` or `pattern`
+    /// is not set or if `pattern` contain `{rust_target}`, but `rust_target` is not set.
     ///
     /// # Panics
     ///
@@ -297,7 +334,7 @@ impl GithubUpdaterBuilder {
 
         let pattern = self
             .pattern
-            .as_ref()
+            .clone()
             .ok_or(GithubUpdaterError::MissingBuilderField("pattern"))?;
         if pattern.contains("rust_target") && self.rust_target.is_none() {
             return Err(GithubUpdaterError::MissingBuilderField("rust_target"));
@@ -311,7 +348,7 @@ impl GithubUpdaterBuilder {
                 .map(|token| HeaderValue::from_str(&format!("Bearer {token}")))
                 .transpose()
                 .expect("GitHub token should always be valid ASCII"),
-            pattern: self.pattern.unwrap_or_default(),
+            pattern,
             file_name: match self.file_extension {
                 Some(extension) => format!("{app_name}.{extension}"),
                 None => app_name.clone(),
@@ -345,8 +382,15 @@ impl GithubUpdater {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// let update_result = updater_builder.force_update().await?;
+    /// ```rust,no_run
+    /// use github_updater::GithubUpdaterBuilder;
+    ///
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let updater = GithubUpdaterBuilder::default().build()?;
+    /// let update_result = updater.force_update().await?;
+    /// #
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn force_update(&self) -> Result<UpdateResult, GithubUpdaterError> {
         let (asset, latest_version) = self.fetch_latest_release().await?;
@@ -367,8 +411,15 @@ impl GithubUpdater {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// let update_result = updater_builder.update().await?;
+    /// ```rust,no_run
+    /// use github_updater::GithubUpdaterBuilder;
+    ///
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let updater = GithubUpdaterBuilder::default().build()?;
+    /// let update_result = updater.update().await?;
+    /// #
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn update(&self) -> Result<UpdateResult, GithubUpdaterError> {
         let (asset, latest_version) = self.fetch_latest_release().await?;
@@ -519,7 +570,8 @@ impl GithubUpdater {
             file_size += chunk.len();
         }
 
-        let file_digest = file_hasher.map(|file_hasher| format!("{:x}", file_hasher.finalize()));
+        let file_digest =
+            file_hasher.map(|file_hasher| format!("{:x}", HexDisplay(&file_hasher.finalize())));
         if (asset.digest.is_some() && file_digest != asset.digest) || content_length != file_size {
             tokio::fs::remove_file(&download_path).await?;
 
@@ -565,6 +617,6 @@ impl GithubUpdater {
             hasher.update(&buffer[..size]);
         }
 
-        Ok(format!("{:x}", hasher.finalize()))
+        Ok(format!("{:x}", HexDisplay(&hasher.finalize())))
     }
 }
