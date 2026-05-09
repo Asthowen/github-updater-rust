@@ -1,6 +1,8 @@
 #![deny(clippy::all, clippy::pedantic)]
 
 mod error;
+mod github_api;
+mod utils;
 
 pub use error::GithubUpdaterError;
 
@@ -10,13 +12,18 @@ use base16ct::HexDisplay;
 use futures_util::TryStreamExt;
 use reqwest::header::{self, HeaderValue};
 use reqwest::{Client, Response};
+use semver::{Prerelease, Version};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// Struct containing the result of the update.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+use self::github_api::{Asset, Release, Tag};
+use self::utils::next_link_header;
+
+/// The result of an update operation.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum UpdateResult {
     /// If a new version of the file has been downloaded.
@@ -41,17 +48,16 @@ pub enum UpdateResult {
     },
 }
 
-#[derive(Debug, Deserialize)]
-struct Release {
-    assets: Vec<Asset>,
-    name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct Asset {
-    digest: Option<String>,
-    name: String,
-    url: String,
+/// Specifies which versions are eligible for updates.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub enum VersionStrategy {
+    /// Selects the highest available version.
+    Latest,
+    /// Selects the highest available stable version.
+    ///
+    /// Pre-release such as release candidates are ignored.
+    #[default]
+    LatestStable,
 }
 
 /// A `GithubUpdaterBuilder` can be used to create a `GithubUpdater`.
@@ -61,24 +67,29 @@ pub struct GithubUpdaterBuilder {
     reqwest_client: Option<Client>,
     github_token: Option<String>,
     pattern: Option<String>,
+    tag_prefix: Option<String>,
+    tag_version_strategy: Option<VersionStrategy>,
+    tag_pages_limit: Option<u8>,
     app_name: Option<String>,
     rust_target: Option<String>,
     repository_info: Option<(String, String)>,
     download_path: Option<PathBuf>,
-    file_extension: Option<String>,
     erase_previous_file: Option<bool>,
 }
 
-#[derive(Debug, Clone)]
+/// A `GithubUpdater` client for checking and downloading updates from GitHub releases.
+#[derive(Clone, Debug)]
 pub struct GithubUpdater {
     reqwest_client: Client,
     github_token: Option<HeaderValue>,
     pattern: String,
+    tag_prefix: Option<String>,
+    tag_version_strategy: Option<VersionStrategy>,
+    tag_pages_limit: Option<u8>,
     app_name: String,
     rust_target: Option<String>,
     repository_info: (String, String),
     download_path: PathBuf,
-    file_name: String,
     erase_previous_file: bool,
 }
 
@@ -113,9 +124,9 @@ impl GithubUpdaterBuilder {
     ///
     /// # Arguments
     ///
-    /// * `pattern` - The file pattern, which can contain:
-    ///    * `app_name`: The name of the application.
-    ///    * `rust_target`: The Rust target, e.g.: i686-unknown-freebsd.
+    /// * `pattern` - A file pattern, the following placeholders are supported:
+    ///    * `app_name`: The name of the application, e.g. `afetch`.
+    ///    * `rust_target`: The Rust target, e.g. `i686-unknown-freebsd`.
     ///    * `app_version`: The version of the application.
     ///
     /// # Example
@@ -125,7 +136,7 @@ impl GithubUpdaterBuilder {
     ///
     /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
     /// let updater_builder = GithubUpdater::builder()
-    ///     .release_file_name_pattern("{app_name}-{app_version}-{rust_target}")
+    ///     .release_file_name_pattern("{app_name}-{app_version}-{rust_target}.so")
     ///     .build()?;
     /// #
     /// # Ok(())
@@ -133,6 +144,103 @@ impl GithubUpdaterBuilder {
     /// ```
     pub fn release_file_name_pattern<S: Into<String>>(mut self, pattern: S) -> Self {
         self.pattern = Some(pattern.into());
+
+        self
+    }
+
+    /// Sets the tag prefix used to extract versions from Git tags.
+    ///
+    /// **The version must always appear at the end of the tag name (after the prefix).**
+    ///
+    /// This allows to retrieve the latest version using Git tags and semantic versioning
+    /// rather than using the GitHub release marked as `latest`.
+    ///
+    /// # Arguments
+    ///
+    /// * `prefix` - A prefix used to match tag names, the following placeholders are supported:
+    ///    * `app_name`: The name of the application, e.g. `afetch`.
+    ///    * `rust_target`: The Rust target, e.g. `i686-unknown-freebsd`.
+    ///
+    /// # Example
+    ///
+    /// - Match tags like `1.0.0`:
+    /// ```rust
+    /// use github_updater::GithubUpdater;
+    ///
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let updater_builder = GithubUpdater::builder()
+    ///     .tag_prefix("")
+    ///     .build()?;
+    /// #
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// - Match tags like `afetch-1.0.0`:
+    /// ```rust
+    /// use github_updater::GithubUpdater;
+    ///
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let updater_builder = GithubUpdater::builder()
+    ///     .tag_prefix("{app_name}-")
+    ///     .build()?;
+    /// #
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn tag_prefix<S: Into<String>>(mut self, prefix: S) -> Self {
+        self.tag_prefix = Some(prefix.into());
+
+        self
+    }
+
+    /// Sets the tag version strategy.
+    ///
+    /// # Arguments
+    ///
+    /// * `version_strategy` - The version strategy.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use github_updater::{GithubUpdater, VersionStrategy};
+    ///
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let updater_builder = GithubUpdater::builder()
+    ///     .tag_version_strategy(VersionStrategy::LatestStable)
+    ///     .build()?;
+    /// #
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn tag_version_strategy(mut self, version_strategy: VersionStrategy) -> Self {
+        self.tag_version_strategy = Some(version_strategy);
+
+        self
+    }
+
+    /// Sets the maximum number of pages to scan when searching for the latest tag version (a page can contain up to 100 items).
+    /// The default value is `2`.
+    ///
+    /// # Arguments
+    ///
+    /// * `pages` - The maximum number of pages to process.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use github_updater::{GithubUpdater, VersionStrategy};
+    ///
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let updater_builder = GithubUpdater::builder()
+    ///     .tag_pages_limit(2)
+    ///     .build()?;
+    /// #
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn tag_pages_limit(mut self, pages: u8) -> Self {
+        self.tag_pages_limit = Some(pages);
 
         self
     }
@@ -191,7 +299,7 @@ impl GithubUpdaterBuilder {
     ///
     /// # Arguments
     ///
-    /// * `rust_target` - The Rust target, e.g.: i686-unknown-freebsd.
+    /// * `rust_target` - The Rust target, e.g. `i686-unknown-freebsd`.
     ///
     /// # Example
     ///
@@ -216,8 +324,8 @@ impl GithubUpdaterBuilder {
     ///
     /// # Arguments
     ///
-    /// * `repository_owner` - The GitHub repository owner, e.g.: `Asthowen`.
-    /// * `repository_name` - The GitHub repository name, e.g.: `AFetch`.
+    /// * `repository_owner` - The GitHub repository owner, e.g. `Asthowen`.
+    /// * `repository_name` - The GitHub repository name, e.g. `AFetch`.
     ///
     /// # Example
     ///
@@ -246,7 +354,7 @@ impl GithubUpdaterBuilder {
     ///
     /// # Arguments
     ///
-    /// * `path` - The download folder path, e.g.: `~/downloads`.
+    /// * `path` - The download folder path, e.g. `~/downloads`.
     ///
     /// # Example
     ///
@@ -263,31 +371,6 @@ impl GithubUpdaterBuilder {
     /// ```
     pub fn download_path(mut self, path: impl AsRef<Path>) -> Self {
         self.download_path = Some(path.as_ref().to_owned());
-
-        self
-    }
-
-    /// Sets the extension of the downloaded file.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - The extension, e.g.: `exe`, `so`, `dll`.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use github_updater::GithubUpdater;
-    ///
-    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
-    /// let updater_builder = GithubUpdater::builder()
-    ///     .file_extension("so")
-    ///     .build()?;
-    /// #
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn file_extension<S: Into<String>>(mut self, extension: S) -> Self {
-        self.file_extension = Some(extension.into());
 
         self
     }
@@ -321,8 +404,8 @@ impl GithubUpdaterBuilder {
     ///
     /// # Errors
     ///
-    /// This method return an error if `app_name` or `download_path` or `repository_info` or `pattern`
-    /// is not set or if `pattern` contain `{rust_target}`, but `rust_target` is not set.
+    /// This method returns an error if `app_name` or `download_path` or `repository_info` or `pattern`
+    /// is not set or if `pattern` or `tag_prefix` contains `{rust_target}`, but `rust_target` is not set.
     ///
     /// # Panics
     ///
@@ -336,7 +419,11 @@ impl GithubUpdaterBuilder {
             .pattern
             .clone()
             .ok_or(GithubUpdaterError::MissingBuilderField("pattern"))?;
-        if pattern.contains("rust_target") && self.rust_target.is_none() {
+        if (pattern.contains("{rust_target}") && self.rust_target.is_none())
+            || self.tag_prefix.as_ref().is_some_and(|tag_prefix| {
+                self.rust_target.is_none() && tag_prefix.contains("{rust_target}")
+            })
+        {
             return Err(GithubUpdaterError::MissingBuilderField("rust_target"));
         }
 
@@ -349,10 +436,9 @@ impl GithubUpdaterBuilder {
                 .transpose()
                 .expect("GitHub token should always be valid ASCII"),
             pattern,
-            file_name: match self.file_extension {
-                Some(extension) => format!("{app_name}.{extension}"),
-                None => app_name.clone(),
-            },
+            tag_prefix: self.tag_prefix,
+            tag_version_strategy: self.tag_version_strategy,
+            tag_pages_limit: self.tag_pages_limit,
             app_name,
             rust_target: self.rust_target,
             repository_info: self
@@ -393,8 +479,8 @@ impl GithubUpdater {
     /// # }
     /// ```
     pub async fn force_update(&self) -> Result<UpdateResult, GithubUpdaterError> {
-        let (asset, latest_version) = self.fetch_latest_release().await?;
-        let target_path = self.download_path.join(&self.file_name);
+        let (asset, latest_version) = self.fetch_latest_asset().await?;
+        let target_path = self.download_path.join(&asset.name);
         self.update_internal(target_path, &asset, latest_version, true)
             .await
     }
@@ -422,17 +508,17 @@ impl GithubUpdater {
     /// # }
     /// ```
     pub async fn update(&self) -> Result<UpdateResult, GithubUpdaterError> {
-        let (asset, latest_version) = self.fetch_latest_release().await?;
+        let (asset, latest_version) = self.fetch_latest_asset().await?;
 
-        let downloaded_path = self.download_path.join(&self.file_name);
-        let downloaded_digest = if downloaded_path.exists() {
+        let downloaded_path = self.download_path.join(&asset.name);
+        let downloaded_digest = if tokio::fs::try_exists(&downloaded_path).await? {
             Some(self.file_digest(&downloaded_path).await?)
         } else {
             None
         };
 
         if (asset.digest.is_none() || downloaded_digest == asset.digest)
-            && let Some(current_version) = self.downloaded_version().await?
+            && let Some(current_version) = self.downloaded_version(&asset.name).await?
             && current_version == latest_version
         {
             Ok(UpdateResult::AlreadyUpToDate {
@@ -444,9 +530,12 @@ impl GithubUpdater {
         }
     }
 
-    async fn downloaded_version(&self) -> Result<Option<String>, GithubUpdaterError> {
-        let version_file: PathBuf = self.download_path.join(format!(".{}", self.app_name));
-        if version_file.exists() {
+    async fn downloaded_version(
+        &self,
+        file_name: &str,
+    ) -> Result<Option<String>, GithubUpdaterError> {
+        let version_file: PathBuf = self.download_path.join(format!(".{file_name}.txt"));
+        if tokio::fs::try_exists(&version_file).await? {
             Ok(Some(
                 tokio::fs::read_to_string(&version_file)
                     .await?
@@ -479,29 +568,44 @@ impl GithubUpdater {
         Ok(response)
     }
 
-    async fn fetch_latest_release(&self) -> Result<(Asset, String), GithubUpdaterError> {
-        let url: String = format!(
-            "https://api.github.com/repos/{}/{}/releases/latest",
-            self.repository_info.0, self.repository_info.1
-        );
+    async fn send_json_request<T: DeserializeOwned>(
+        &self,
+        url: &str,
+    ) -> Result<(T, Option<String>), GithubUpdaterError> {
         let response = self
-            .send_request(&url, "application/vnd.github+json")
-            .await?
-            .json::<Release>()
+            .send_request(url, "application/vnd.github+json")
             .await?;
 
-        let mut pattern: String = self
-            .pattern
-            .replace("{app_version}", &response.name)
-            .replace("{app_name}", &self.app_name);
-        if let Some(rust_target) = &self.rust_target {
-            pattern = pattern.replace("{rust_target}", rust_target);
-        }
+        let link_header = response
+            .headers()
+            .get(header::LINK)
+            .and_then(|header| header.to_str().ok())
+            .map(str::to_owned);
 
-        response
+        Ok((response.json().await?, link_header))
+    }
+
+    async fn fetch_latest_asset(&self) -> Result<(Asset, String), GithubUpdaterError> {
+        let (release_url_part, version) = if let Some(tag_prefix) = &self.tag_prefix {
+            let (tag_name, version) = self.fetch_latest_tag(tag_prefix).await?;
+            (format!("tags/{tag_name}"), Some(version.to_string()))
+        } else {
+            ("latest".to_owned(), None)
+        };
+        let (release, _) = self
+            .send_json_request::<Release>(&format!(
+                "https://api.github.com/repos/{}/{}/releases/{release_url_part}",
+                self.repository_info.0, self.repository_info.1
+            ))
+            .await?;
+
+        let version = version.unwrap_or(release.name);
+        let pattern: String = self.resolve_pattern(&self.pattern, Some(&version));
+
+        release
             .assets
             .into_iter()
-            .find(|asset| asset.name.contains(&pattern))
+            .find(|asset| asset.name == pattern)
             .ok_or_else(|| {
                 GithubUpdaterError::FetchFailed("Unable to find the URL of the requested release.")
             })
@@ -509,8 +613,63 @@ impl GithubUpdater {
                 asset.digest = asset
                     .digest
                     .map(|digest| digest.trim_start_matches("sha256:").to_owned());
-                (asset, response.name)
+                (asset, version)
             })
+    }
+
+    async fn fetch_latest_tag(
+        &self,
+        tag_name_pattern: &str,
+    ) -> Result<(String, Version), GithubUpdaterError> {
+        let pattern: String = self.resolve_pattern(tag_name_pattern, None);
+        let tag_version_strategy = self.tag_version_strategy.unwrap_or_default();
+
+        let mut latest_version = None;
+        let mut next_url = Some(format!(
+            "https://api.github.com/repos/{}/{}/tags?per_page=100",
+            self.repository_info.0, self.repository_info.1
+        ));
+        let mut tag_pages_limit = self.tag_pages_limit.unwrap_or(2);
+        while let Some(url) = next_url
+            && tag_pages_limit > 0
+        {
+            let (tags, link_header) = self.send_json_request::<Vec<Tag>>(&url).await?;
+
+            let max_version = tags
+                .into_iter()
+                .filter_map(|tag| {
+                    let version = Version::parse(if pattern.is_empty() {
+                        tag.name.as_str()
+                    } else {
+                        tag.name.split_once(&pattern)?.1
+                    })
+                    .ok()?;
+
+                    match tag_version_strategy {
+                        VersionStrategy::Latest => Some((tag.name, version)),
+                        VersionStrategy::LatestStable if version.pre == Prerelease::EMPTY => {
+                            Some((tag.name, version))
+                        }
+                        VersionStrategy::LatestStable => None,
+                    }
+                })
+                .max_by(|a, b| a.1.cmp(&b.1));
+
+            if let Some(max_version) = max_version
+                && latest_version
+                    .as_ref()
+                    .is_none_or(|(_, latest_version)| max_version.1 > *latest_version)
+            {
+                latest_version = Some(max_version);
+            }
+
+            next_url = link_header.and_then(|link_header| next_link_header(&link_header));
+            tag_pages_limit -= 1;
+        }
+
+        latest_version.ok_or_else(|| {
+            GithubUpdaterError::FetchFailed("Unable to find the URL of the requested tag.")
+        })
     }
 
     async fn update_internal(
@@ -521,19 +680,19 @@ impl GithubUpdater {
         force: bool,
     ) -> Result<UpdateResult, GithubUpdaterError> {
         let target_path = target_path.as_ref();
-        let download_path: PathBuf = if target_path.exists() {
-            self.download_path.join(format!("new_{}", self.file_name))
+        let download_path: PathBuf = if tokio::fs::try_exists(&target_path).await? {
+            self.download_path.join(format!("new_{}", asset.name))
         } else {
-            if !self.download_path.exists() {
+            if !tokio::fs::try_exists(&self.download_path).await? {
                 tokio::fs::create_dir_all(&self.download_path).await?;
             }
 
             target_path.to_owned()
         };
 
-        let downloaded_version: Option<String> = self.downloaded_version().await?;
+        let downloaded_version: Option<String> = self.downloaded_version(&asset.name).await?;
 
-        if download_path.exists() {
+        if tokio::fs::try_exists(&download_path).await? {
             tokio::fs::remove_file(&download_path).await?;
         }
 
@@ -591,7 +750,7 @@ impl GithubUpdater {
 
         // Write version in file
         tokio::fs::write(
-            self.download_path.join(format!(".{}", self.app_name)),
+            self.download_path.join(format!(".{}.txt", asset.name)),
             version.as_bytes(),
         )
         .await?;
@@ -618,5 +777,17 @@ impl GithubUpdater {
         }
 
         Ok(format!("{:x}", HexDisplay(&hasher.finalize())))
+    }
+
+    fn resolve_pattern(&self, pattern: &str, app_version: Option<&str>) -> String {
+        let mut pattern: String = pattern.replace("{app_name}", &self.app_name);
+        if let Some(app_version) = app_version {
+            pattern = pattern.replace("{app_version}", app_version);
+        }
+        if let Some(rust_target) = &self.rust_target {
+            pattern = pattern.replace("{rust_target}", rust_target);
+        }
+
+        pattern
     }
 }

@@ -19,6 +19,9 @@
 
 ## Basic usage
 ### Create client
+#### Use latest release
+This mode retrieves the version marked as the latest release on GitHub. The release name will be used as the version.
+
 ```rust
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,6 +32,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .rust_target("i686-unknown-linux-musl")
         .release_file_name_pattern("{app_name}-{app_version}-{rust_target}")
         .file_extension("exe")
+        .github_token("token")
+        .build()?;
+
+    Ok(())
+}
+```
+
+### Use latest tag
+This mode retrieves the latest version according to semantic versioning from Git tags, which allows support for monorepos, for example.
+
+**The version must always appear at the end of the tag name (after the prefix).**
+
+In this example, tags such as `app-name-1.0.0` will be considered:
+
+```rust
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = GithubUpdater::builder()
+        .download_path("~/downloads")
+        .repository_info("repository-owner", "repository-name")
+        .app_name("app-name")
+        .rust_target("i686-unknown-linux-musl")
+        .tag_prefix("{app_name}-")
+        .tag_version_strategy(VersionStrategy::LatestStable)
+        .release_file_name_pattern("{app_name}-{app_version}-{rust_target}")
         .github_token("token")
         .build()?;
 
