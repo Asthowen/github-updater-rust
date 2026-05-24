@@ -66,7 +66,8 @@ pub enum VersionStrategy {
 pub struct GithubUpdaterBuilder {
     reqwest_client: Option<Client>,
     github_token: Option<String>,
-    pattern: Option<String>,
+    release_file_name_pattern: Option<String>,
+    local_file_name_pattern: Option<String>,
     tag_prefix: Option<String>,
     tag_version_strategy: Option<VersionStrategy>,
     tag_pages_limit: Option<u8>,
@@ -82,7 +83,8 @@ pub struct GithubUpdaterBuilder {
 pub struct GithubUpdater {
     reqwest_client: Client,
     github_token: Option<HeaderValue>,
-    pattern: String,
+    release_file_name_pattern: String,
+    local_file_name: String,
     tag_prefix: Option<String>,
     tag_version_strategy: Option<VersionStrategy>,
     tag_pages_limit: Option<u8>,
@@ -120,7 +122,7 @@ impl GithubUpdaterBuilder {
         self
     }
 
-    /// Sets the filename pattern in GitHub releases.
+    /// Sets the filename pattern used for GitHub release files.
     ///
     /// # Arguments
     ///
@@ -143,7 +145,34 @@ impl GithubUpdaterBuilder {
     /// # }
     /// ```
     pub fn release_file_name_pattern<S: Into<String>>(mut self, pattern: S) -> Self {
-        self.pattern = Some(pattern.into());
+        self.release_file_name_pattern = Some(pattern.into());
+
+        self
+    }
+
+    /// Sets the filename pattern used for the downloaded local file.
+    ///
+    /// # Arguments
+    ///
+    /// * `pattern` - A file pattern, the following placeholders are supported:
+    ///    * `app_name`: The name of the application, e.g. `afetch`.
+    ///    * `rust_target`: The Rust target, e.g. `i686-unknown-freebsd`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use github_updater::GithubUpdater;
+    ///
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let updater_builder = GithubUpdater::builder()
+    ///     .local_file_name_pattern("{app_name}-{rust_target}.so")
+    ///     .build()?;
+    /// #
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn local_file_name_pattern<S: Into<String>>(mut self, pattern: S) -> Self {
+        self.local_file_name_pattern = Some(pattern.into());
 
         self
     }
@@ -415,16 +444,31 @@ impl GithubUpdaterBuilder {
             .app_name
             .ok_or_else(|| GithubUpdaterError::MissingBuilderField("app_name"))?;
 
-        let pattern = self
-            .pattern
-            .clone()
-            .ok_or(GithubUpdaterError::MissingBuilderField("pattern"))?;
-        if (pattern.contains("{rust_target}") && self.rust_target.is_none())
-            || self.tag_prefix.as_ref().is_some_and(|tag_prefix| {
-                self.rust_target.is_none() && tag_prefix.contains("{rust_target}")
-            })
+        let release_file_name_pattern =
+            self.release_file_name_pattern
+                .ok_or(GithubUpdaterError::MissingBuilderField(
+                    "release_file_name_pattern",
+                ))?;
+        let local_file_name_pattern =
+            self.local_file_name_pattern
+                .ok_or(GithubUpdaterError::MissingBuilderField(
+                    "local_file_name_pattern",
+                ))?;
+        if self.rust_target.is_none()
+            && (release_file_name_pattern.contains("{rust_target}")
+                || local_file_name_pattern.contains("{rust_target}")
+                || self
+                    .tag_prefix
+                    .as_ref()
+                    .is_some_and(|tag_prefix| tag_prefix.contains("{rust_target}")))
         {
             return Err(GithubUpdaterError::MissingBuilderField("rust_target"));
+        }
+        if local_file_name_pattern.contains("{app_version}") {
+            return Err(GithubUpdaterError::UnsupportedPlaceholder {
+                placeholder: "app_version",
+                context: "local_file_name_pattern",
+            });
         }
 
         Ok(GithubUpdater {
@@ -435,7 +479,13 @@ impl GithubUpdaterBuilder {
                 .map(|token| HeaderValue::from_str(&format!("Bearer {token}")))
                 .transpose()
                 .expect("GitHub token should always be valid ASCII"),
-            pattern,
+            release_file_name_pattern,
+            local_file_name: GithubUpdater::resolve_pattern(
+                &local_file_name_pattern,
+                &app_name,
+                self.rust_target.as_deref(),
+                None,
+            ),
             tag_prefix: self.tag_prefix,
             tag_version_strategy: self.tag_version_strategy,
             tag_pages_limit: self.tag_pages_limit,
@@ -480,7 +530,7 @@ impl GithubUpdater {
     /// ```
     pub async fn force_update(&self) -> Result<UpdateResult, GithubUpdaterError> {
         let (asset, latest_version) = self.fetch_latest_asset().await?;
-        let target_path = self.download_path.join(&asset.name);
+        let target_path = self.download_path.join(&self.local_file_name);
         self.update_internal(target_path, &asset, latest_version, true)
             .await
     }
@@ -510,7 +560,7 @@ impl GithubUpdater {
     pub async fn update(&self) -> Result<UpdateResult, GithubUpdaterError> {
         let (asset, latest_version) = self.fetch_latest_asset().await?;
 
-        let downloaded_path = self.download_path.join(&asset.name);
+        let downloaded_path = self.download_path.join(&self.local_file_name);
         let downloaded_digest = if tokio::fs::try_exists(&downloaded_path).await? {
             Some(self.file_digest(&downloaded_path).await?)
         } else {
@@ -518,7 +568,7 @@ impl GithubUpdater {
         };
 
         if (asset.digest.is_none() || downloaded_digest == asset.digest)
-            && let Some(current_version) = self.downloaded_version(&asset.name).await?
+            && let Some(current_version) = self.downloaded_version(&self.local_file_name).await?
             && current_version == latest_version
         {
             Ok(UpdateResult::AlreadyUpToDate {
@@ -600,7 +650,12 @@ impl GithubUpdater {
             .await?;
 
         let version = version.unwrap_or(release.name);
-        let pattern: String = self.resolve_pattern(&self.pattern, Some(&version));
+        let pattern: String = Self::resolve_pattern(
+            &self.release_file_name_pattern,
+            &self.app_name,
+            self.rust_target.as_deref(),
+            Some(&version),
+        );
 
         release
             .assets
@@ -621,7 +676,12 @@ impl GithubUpdater {
         &self,
         tag_name_pattern: &str,
     ) -> Result<(String, Version), GithubUpdaterError> {
-        let pattern: String = self.resolve_pattern(tag_name_pattern, None);
+        let pattern: String = Self::resolve_pattern(
+            tag_name_pattern,
+            &self.app_name,
+            self.rust_target.as_deref(),
+            None,
+        );
         let tag_version_strategy = self.tag_version_strategy.unwrap_or_default();
 
         let mut latest_version = None;
@@ -681,7 +741,8 @@ impl GithubUpdater {
     ) -> Result<UpdateResult, GithubUpdaterError> {
         let target_path = target_path.as_ref();
         let download_path: PathBuf = if tokio::fs::try_exists(&target_path).await? {
-            self.download_path.join(format!("new_{}", asset.name))
+            self.download_path
+                .join(format!("new_{}", self.local_file_name))
         } else {
             if !tokio::fs::try_exists(&self.download_path).await? {
                 tokio::fs::create_dir_all(&self.download_path).await?;
@@ -690,7 +751,8 @@ impl GithubUpdater {
             target_path.to_owned()
         };
 
-        let downloaded_version: Option<String> = self.downloaded_version(&asset.name).await?;
+        let downloaded_version: Option<String> =
+            self.downloaded_version(&self.local_file_name).await?;
 
         if tokio::fs::try_exists(&download_path).await? {
             tokio::fs::remove_file(&download_path).await?;
@@ -750,7 +812,8 @@ impl GithubUpdater {
 
         // Write version in file
         tokio::fs::write(
-            self.download_path.join(format!(".{}.txt", asset.name)),
+            self.download_path
+                .join(format!(".{}.txt", self.local_file_name)),
             version.as_bytes(),
         )
         .await?;
@@ -779,12 +842,17 @@ impl GithubUpdater {
         Ok(format!("{:x}", HexDisplay(&hasher.finalize())))
     }
 
-    fn resolve_pattern(&self, pattern: &str, app_version: Option<&str>) -> String {
-        let mut pattern: String = pattern.replace("{app_name}", &self.app_name);
+    fn resolve_pattern(
+        pattern: &str,
+        app_name: &str,
+        rust_target: Option<&str>,
+        app_version: Option<&str>,
+    ) -> String {
+        let mut pattern: String = pattern.replace("{app_name}", app_name);
         if let Some(app_version) = app_version {
             pattern = pattern.replace("{app_version}", app_version);
         }
-        if let Some(rust_target) = &self.rust_target {
+        if let Some(rust_target) = rust_target {
             pattern = pattern.replace("{rust_target}", rust_target);
         }
 

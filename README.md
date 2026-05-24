@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .app_name("app-name")
         .rust_target("i686-unknown-linux-musl")
         .release_file_name_pattern("{app_name}-{app_version}-{rust_target}")
-        .file_extension("exe")
+        .local_file_name_pattern("{app_name}-{rust_target}")
         .github_token("token")
         .build()?;
 
@@ -57,6 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .tag_prefix("{app_name}-")
         .tag_version_strategy(VersionStrategy::LatestStable)
         .release_file_name_pattern("{app_name}-{app_version}-{rust_target}")
+        .local_file_name_pattern("{app_name}-{rust_target}")
         .github_token("token")
         .build()?;
 

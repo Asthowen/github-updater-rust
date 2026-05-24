@@ -2,9 +2,14 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum GithubUpdaterError {
-    #[error("Missing builder field attribute: {0}")]
+    #[error("Missing builder field attribute `{0}`")]
     MissingBuilderField(&'static str),
-    #[error("Failed to fetch resource: {0}")]
+    #[error("Unsupported placeholder `{placeholder}` in `{context}`")]
+    UnsupportedPlaceholder {
+        placeholder: &'static str,
+        context: &'static str,
+    },
+    #[error("Failed to fetch resource `{0}`")]
     FetchFailed(&'static str),
     #[error("Unexpected HTTP status {status} for {url}")]
     UnexpectedStatus {
