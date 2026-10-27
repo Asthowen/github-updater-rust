@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
 
@@ -34,7 +34,7 @@ jobs:
 
       - name: Generate changelog
         id: changelog
-        uses: jaywcjlove/changelog-generator@00eecde44f40feee4b5c96fe16e5cfdeab76336a
+        uses: jaywcjlove/changelog-generator@v2.4.0
         if: env.previous_tag && env.current_tag
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -59,7 +59,7 @@ jobs:
         run: echo "${{ steps.changelog.outputs.changelog }}"
 
       - name: Update Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda
+        uses: softprops/action-gh-release@v3.0.3
         if: env.previous_tag && env.current_tag
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
