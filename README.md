@@ -18,6 +18,12 @@
 </div>
 
 ## Basic usage
+### Add to dependencies
+```toml
+[dependencies]
+github-updater = { git = "https://github.com/Asthowen/github-updater-rust", version = "0.2.0" }
+```
+
 ### Create client
 #### Use latest release
 This mode retrieves the version marked as the latest release on GitHub. The release name will be used as the version.

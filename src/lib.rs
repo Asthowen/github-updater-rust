@@ -4,7 +4,7 @@ mod error;
 mod github_api;
 mod utils;
 
-pub use error::GithubUpdaterError;
+pub use self::error::GithubUpdaterError;
 
 use std::path::{Path, PathBuf};
 
